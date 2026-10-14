@@ -1,0 +1,5 @@
+2026-10-14T10:04:59Z INFO service=checkout-api version=v2 event=start
+2026-10-14T10:05:00Z WARN configuration key=PAYMENT_API_URL missing=true fallback=http://localhost:8081
+2026-10-14T10:05:02Z ERROR trace=demo-001 endpoint=/checkout payment_url=http://localhost:8081 error=ConnectionRefused status=500
+2026-10-14T10:05:03Z INFO trace=demo-002 endpoint=/inventory status=200
+2026-10-14T10:05:04Z ERROR trace=demo-003 endpoint=/checkout payment_url=http://localhost:8081 error=ConnectionRefused status=500

@@ -1,0 +1,6 @@
+# 以下为人工构造的离线演示事件，不代表真实生产故障。
+# 演示时间：2026-10-14 10:10 UTC；此 Pod 重启示例独立于 incident.md 的支付配置示例。
+2026-10-14T10:10:00Z namespace=demo-shop pod=queue-worker-demo container=worker event=Started restartCount=0 memoryLimit=128Mi
+2026-10-14T10:12:08Z namespace=demo-shop pod=queue-worker-demo container=worker event=OOMKilled exitCode=137 reason=MemoryLimitExceeded
+2026-10-14T10:12:10Z namespace=demo-shop pod=queue-worker-demo container=worker event=BackOff restartCount=1 message=Back-off_restarting_failed_container
+2026-10-14T10:12:20Z namespace=demo-shop pod=queue-worker-demo container=worker event=Started restartCount=1 memoryLimit=128Mi

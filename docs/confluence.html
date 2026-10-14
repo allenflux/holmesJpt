@@ -1,0 +1,185 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>HolmesGPT Java 精简重写说明</title><style>body{max-width:1100px;margin:40px auto;padding:0 24px;font:16px/1.8 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;color:#243247}h1{font-size:30px}h2{font-size:24px;border-bottom:1px solid #dce2e8;padding-bottom:6px;margin-top:36px}h3{font-size:19px;margin-top:28px}table{border-collapse:collapse;width:100%;margin:18px 0;font-size:14px}td,th{border:1px solid #cbd2dc;text-align:left;padding:8px 10px;vertical-align:top}th{background:#edf1f5}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f3f5f7;border:1px solid #dce2e8;padding:16px;border-radius:4px;line-height:1.55}code{font-family:ui-monospace,Menlo,monospace;font-size:.9em}a{color:#2259a4}p{margin:12px 0}</style></head><body><h1>HolmesGPT Java 精简重写：运行逻辑、配置与源码对照</h1>
+<p>本页详细说明 Java 27 精简版的运行方法、调查循环、工具机制、配置、扩展与原项目差异。目标是让读者能够从一次问题的输入，一直追踪到证据回填与调查结论。版本基准：2026-10-14；原项目 commit：<code>465a54e900feca85cab8a39c82d5ab6f2238cad6</code>。</p>
+<h2>一、快速启动</h2>
+<p>需要 JDK 27 和 Maven 3.9+。在本机 macOS 上选择已通过 Homebrew 安装的 JDK 27：</p>
+<pre><code>export JAVA_HOME=/opt/homebrew/opt/openjdk@27/libexec/openjdk.jdk/Contents/Home
+export PATH=&quot;$JAVA_HOME/bin:$PATH&quot;
+java -version
+mvn -version</code></pre>
+<p>确认两个版本命令都显示 Java 27 后再构建。IntelliJ IDEA 的 Project SDK 和 Maven Runner JRE 也都选择 JDK 27；终端中的 <code>JAVA_HOME</code> 不会自动替换 IDEA 已保存的 SDK 设置。</p>
+<pre><code>mvn test
+mvn package
+java -jar target/holmes-java-0.1.0.jar demo</code></pre>
+<p><code>demo</code> 使用离线脚本模型，执行真实的文件工具，读取 <code>examples/evidence</code> 中的示例证据；它用于验证调查循环，不需要 API Key，也不代表真实模型效果。</p>
+<p>调用真实模型时，在启动进程的环境中设置：</p>
+<pre><code>export LLM_BASE_URL=&#x27;https://llm.aiaipool.com/v1&#x27;
+export LLM_MODEL=&#x27;deepseek-v41-flash&#x27;
+read -s &#x27;LLM_API_KEY?请输入 API Key: &#x27;
+export LLM_API_KEY
+java -jar target/holmes-java-0.1.0.jar ask &#x27;checkout 服务为什么支付失败？&#x27; --trace</code></pre>
+<p>上面的 <code>read -s</code> 示例适用于 macOS 默认的 zsh。不要把真实 Key 写入仓库、文档或命令参数。程序直接读取环境变量；不会自动加载 <code>.env</code> 文件。</p>
+<h3>常用命令</h3>
+<pre><code># 查看本次配置中开放的工具
+java -jar target/holmes-java-0.1.0.jar tools
+
+# 指定工具配置、手册目录与调查步数
+java -jar target/holmes-java-0.1.0.jar ask &#x27;分析 checkout 支付失败的原因&#x27; \
+  --tools config/tools.json --runbooks runbooks --max-steps 8 --trace
+
+# 启动本地 HTTP 服务
+java -jar target/holmes-java-0.1.0.jar serve --port 8080
+
+# 另一终端发起调查
+curl -s http://127.0.0.1:8080/health
+curl -s http://127.0.0.1:8080/api/investigate \
+  -H &#x27;Content-Type: application/json&#x27; \
+  -d &#x27;{&quot;question&quot;:&quot;checkout 服务为什么支付失败？&quot;}&#x27;</code></pre>
+<p>服务绑定 <code>127.0.0.1</code>。真实调查需要已配置 <code>LLM_API_KEY</code>，工具命令在运行 Java 的机器上执行。</p>
+<h2>二、运行逻辑</h2>
+<h3>1. 项目解决什么问题</h3>
+<p>Holmes 的核心用途是把“需要人工不断查日志、查配置、对照手册”的故障调查组织成一个可重复的循环。用户用自然语言提出问题，大模型根据工具说明选择下一项调查，Java 程序执行已开放的工具，把真实结果交还模型，模型再决定继续取证还是给出结论。模型负责规划与解释，程序负责协议、执行和资源限制。</p>
+<p>这与“把问题直接发给模型”有一个关键区别：模型可以在回答前主动获取本机证据。文件内容、命令输出、错误信息都是本次调查的观察结果，操作手册则提供调查方法。模型不能凭空拥有集群数据；它只能使用当前配置开放的工具。若只开放示例文件，回答范围就是这些文件。</p>
+<p>Java 版本重写的是原项目最有教学价值的主线，不追求全部协议和集成兼容。它使用 JDK 的 HTTP 客户端、进程执行能力和 HTTP 服务，Jackson 处理 JSON；不引入 Spring、数据库、消息队列或向量检索。这样一次请求从哪里进入、证据怎样进入模型、何时停止，可以沿少数几个类读清楚。</p>
+<h3>2. 架构图</h3>
+<p>架构图见本文末尾“配套图表”，展示入口、调查引擎、模型接口、工具与证据之间的关系。</p>
+<p>从入口到外部系统有三个层次：CLI 和本地 HTTP 负责接收问题；调查引擎保存消息、控制循环并调用模型；工具注册表负责把模型给出的工具名称和参数映射到本地动作。配置文件决定允许哪些动作，Markdown 手册补充调查方法，证据目录或管理员配置的命令提供实际观察结果。</p>
+<p>外部大模型通过 OpenAI 兼容的 <code>POST /chat/completions</code> 被调用。配置的 Base URL 是 API 根路径，例如 <code>https://llm.aiaipool.com/v1</code>，客户端在后面追加 <code>/chat/completions</code>。工具在 Java 所在机器执行，而不是在模型服务商的机器执行。工具输出随后进入模型请求，因此需要由管理员选择适合发送给模型服务的证据来源。</p>
+<h3>3. 启动时准备什么</h3>
+<p>首先读取环境变量与命令行参数，确定模型地址、模型名称、超时、调查预算、工具配置路径和操作手册目录。随后解析工具配置，建立可调用工具注册表，验证证据根目录与命令定义。工具说明会转换成 JSON Schema，供模型理解每个工具的用途和合法参数。</p>
+<p>手册目录中的 Markdown 文本在程序准备引擎时加载，并加入每次调查的系统提示。当前实现采用直接加载小型手册的方式，没有向量库、检索召回、文件名语义匹配或后台知识库同步。手册写得越长，占用的上下文越多；适合保留调查步骤、判断标准和输出要求，把大量历史日志留在工具可读取的证据目录。HTTP 服务运行中修改手册后，需要重启以重新加载。</p>
+<p>系统提示承担三项职责：约束模型基于证据回答；说明工具结果属于观察数据，不能覆盖系统规则；要求区分事实、推测和未知事项。它与手册合并后形成调查方法，用户问题决定本次调查目标。</p>
+<h3>4. 一次请求如何执行</h3>
+<p><strong>4.1 建立消息列表</strong></p>
+<p>调查以一个独立的消息列表开始。第一条是 <code>system</code>，包含程序约束与操作手册；第二条是 <code>user</code>，包含本次问题。HTTP 请求之间不共享这个列表，CLI 的多次启动也不自动保留历史。当前没有用户会话数据库。</p>
+<p>模型请求包含 <code>model</code>、<code>messages</code> 和当前允许使用的 <code>tools</code>。工具的名称、说明和参数结构随请求发送。API Key 放在 HTTP Authorization 请求头中，不放入模型消息、工具参数或文档。</p>
+<p><strong>4.2 模型决定回答或取证</strong></p>
+<p>模型返回一个 assistant 消息。若没有 <code>tool_calls</code>，其正文作为最终答案，调查结束。若存在工具调用，程序先保留这条 assistant 消息，再逐个读取调用的 ID、工具名称和 JSON 参数。模型只提出请求；能否执行由注册表和工具自身校验决定。</p>
+<p>例如模型可能先请求 <code>list_files</code> 确认证据，再用 <code>read_file</code> 读取某个日志，或者用 <code>search_files</code> 搜索 <code>OOMKilled</code>。管理员配置了命令工具时，模型也可能选择其中的工具，但它不能临时增加新的可执行程序或任意拼接 shell。</p>
+<p><strong>4.3 Java 执行工具并回填结果</strong></p>
+<p>工具注册表按名称寻找实现，校验参数后执行。文件工具被限制在配置的证据根目录内，并限制扫描数量和读取大小；命令工具根据管理员给定的 argv 列表启动进程，不经 shell 解释。命令执行有超时，所有工具返回内容都有字符上限，错误会成为结构化结果，供模型判断是否换一种方式继续。</p>
+<p>工具结果以 <code>role: tool</code> 消息加入同一消息列表，并使用 <code>tool_call_id</code> 对应原调用。这个 ID 让模型知道哪段结果属于哪次请求。即使一个 assistant 消息同时请求多个工具，各个结果也有独立对应关系；当前实现顺序执行，便于阅读和控制资源。</p>
+<p><strong>4.4 证据进入下一轮模型请求</strong></p>
+<p>消息列表现在包含问题、模型的工具请求和工具的实际输出。下一次请求把这些内容一起交还模型，模型据此更新判断。它可以继续请求工具，也可以给出最终答案。调查不是固定的“先读 A 再读 B”脚本，路径由模型根据已有证据动态选择，程序始终限制可用动作与总预算。</p>
+<p>离线 <code>demo</code> 使用预先编排的模型响应来确定性地演示这条路径，文件读取仍是真实操作。因此 demo 可以证明工具协议和循环已贯通，却不能证明指定模型服务可用，也不能代表真实模型在不同问题下的调查质量。</p>
+<h3>5. 调查流程图</h3>
+<p>调查流程图见本文末尾“配套图表”，展示循环、取证分支与预算停止路径。</p>
+<p>主路径是：准备上下文 → 调用模型 → 判断是否有工具调用 → 校验预算并执行工具 → 追加证据 → 再次调用模型。没有工具调用时直接形成答案；无法继续取证时进入受限收束。为了保持图可读，图中合并了文件与命令工具的内部细节，具体保护规则见配置文档。</p>
+<h3>6. 为什么循环不会无限运行</h3>
+<p>程序同时限制调查步数、工具调用次数、命令执行时间、单次工具输出和总上下文字符数。步数约束模型调用循环，工具次数约束新的工具尝试数量；一次模型响应可以请求多个工具，因此两个值不能互相替代。同一调查中名称与 JSON 参数完全相同的调用复用先前结果，不重复执行，也不增加工具计数；因此它看到的是第一次调用时的快照。参数解析失败也消耗一次工具预算。字符预算按序列化消息字符串计量，是简单、可观察的本地保护，不等于模型服务的 token 精确计费。</p>
+<p><code>maxSteps</code> 包含收束轮：默认 8 轮最多允许前 7 轮取证，第 8 轮关闭工具并要求模型给结论。工具预算用尽或上下文接近上限时也会提前进入收束。收束请求只使用已有证据；客户端不再发送工具定义。如果模型仍返回工具调用，程序明确返回 <code>budget_exceeded</code>，避免把没有完成的调查伪装成完整答案。消息已经超过上下文预算时则直接返回 <code>context_budget</code>，不会压缩历史或额外请求模型。</p>
+<table><thead><tr><th>停止原因</th><th>解释</th></tr></thead><tbody><tr><td><code>completed</code></td><td>模型正常返回无工具调用的答案</td></tr><tr><td><code>step_budget</code></td><td>在模型轮次上限内完成最后收束，结论可能仍有未知项</td></tr><tr><td><code>tool_budget</code></td><td>工具总预算耗尽后完成收束</td></tr><tr><td><code>context_budget</code></td><td>上下文接近上限后收束，或已经超限直接停止；需结合答案区分</td></tr><tr><td><code>model_truncated</code></td><td>上游 <code>finish_reason</code> 为 <code>length</code>，答案可能被截断</td></tr><tr><td><code>budget_exceeded</code></td><td>收束轮仍提出工具调用，程序停止且未生成完整结论</td></tr></tbody></table>
+<p>提高预算可以让模型看更多数据，但也增加响应时间、费用和输出噪声。更有效的办法通常是提供清晰问题、短小手册和能直接缩小范围的工具。大文件先搜索再读取、日志按故障时间窗口裁剪，比无限提高上下文上限更实用。</p>
+<h3>7. 用两个独立示例理解证据链</h3>
+<p>默认目录包含两组人工构造的故障证据，不能合并为一个事故。支付示例对应 <code>checkout-api</code>：<code>incident.md</code> 描述发布 v2 后错误率上升；<code>application.log</code> 记录缺少 <code>PAYMENT_API_URL</code>，回退到 <code>localhost:8081</code> 后出现 <code>ConnectionRefused</code> 和 HTTP 500；<code>deployment.yaml</code> 仍配置旧键名 <code>PAYMENT_URL</code>。这些交叉证据支持“变量名不一致导致支付地址配置失效”的判断。实际是否已经修复，需要修改配置后的运行结果才能确认。</p>
+<p>OOM 示例对应另一个对象 <code>queue-worker-demo</code>，证据在 <code>pod-events.log</code>。用户提出“queue-worker-demo 为什么不断重启”，模型先确认对象与时间，再查看 <code>OOMKilled</code>、退出码 137 和 128Mi 限制。第一步是验证重启确实与内存相关，而不是仅凭“重启”判定泄漏。离线 demo 就使用这组文件演示取证。</p>
+<p>随后对照 JVM 堆上限、容器限制、请求增长、批处理规模或缓存变化。只有证据中出现的数值和事件才能作为事实。配置变化紧邻故障可以支持假设，却不能独立证明因果；没有堆转储时，也不能直接断言某个类存在泄漏。手册提醒模型保留这些区分，工具提供能否验证的依据。</p>
+<p>最终答案应包括现象、关键证据、最可能原因、尚未排除的解释及下一步建议。例如“现有指标支持内存压力导致重启，但缺少堆转储，无法确定对象泄漏类型”比无依据的确定性结论更可靠。建议的扩容、限流、修改堆大小或重启只作为人工决策输入，本项目不自动执行修复。</p>
+<h3>8. 怎样阅读代码和 trace</h3>
+<p>建议按 <code>Main</code> → <code>AppConfig</code> → <code>AgentEngine</code> → <code>OpenAiClient</code> → <code>ToolRegistry</code> 的顺序阅读。<code>Main</code> 负责参数和结果展示；<code>AgentEngine</code> 的循环决定消息何时增加和调查何时结束；<code>OpenAiClient</code> 负责协议转换和 HTTP；<code>ToolRegistry</code> 负责本机动作。<code>Runbooks</code> 管理手册加载，<code>HttpApi</code> 把同一引擎暴露给本地客户端，<code>DemoLlm</code> 用脚本响应验证离线流程。</p>
+<p><code>ask</code> 加 <code>--trace</code> 可以观察每轮发生的工具调用和执行结果。HTTP 结果中的 <code>steps</code> 是模型调用次数，包含收束轮；<code>toolCalls</code> 是新的工具尝试数；<code>stopReason</code> 解释调查为何停止。<code>trace</code> 记录 <code>step</code>、<code>tool</code>、<code>success</code>、<code>truncated</code>、<code>reused</code>、<code>durationMs</code> 与 <code>output</code>，包括命中缓存和预算拒绝执行的工具记录，因此 trace 条数可能大于 toolCalls。这里的 trace 是执行轨迹，不是模型内部思维，也不应被解释成根因证明。</p>
+<p>遇到不可信结论，先确认是否真的调用过相关工具；再确认结果是否被截断、时间窗口是否对齐、手册是否诱导了过强结论。遇到执行失败，先检查工具配置和本机环境；遇到模型请求失败，再检查 Base URL、Key、模型名称和网络。分层排查比重复修改提示词更容易定位问题。</p>
+<h2>三、配置与扩展</h2>
+<h3>1. 模型连接与启动方式</h3>
+<p>项目要求 Java 27，使用 Maven 构建为可执行 JAR。<code>mvn test</code> 运行测试，<code>mvn package</code> 生成 <code>target/holmes-java-0.1.0.jar</code>。依赖首次下载需要 Maven 仓库可达；离线 demo 的“离线”表示调查过程不访问大模型，并不保证首次构建无需下载依赖。</p>
+<p>构建前通过 <code>java -version</code> 和 <code>mvn -version</code> 确认运行的是 JDK 27。macOS Homebrew 的 JDK 选择命令见本页快速启动。使用 IntelliJ IDEA 时，Project SDK 与 Maven Runner JRE 均应设置为 JDK 27，避免终端、编辑器和 Maven 使用不同版本。</p>
+<p>真实模型通过以下环境变量设置。<code>LLM_BASE_URL</code> 默认 <code>https://llm.aiaipool.com/v1</code>，<code>LLM_MODEL</code> 默认 <code>deepseek-v41-flash</code>。必须通过 <code>LLM_API_KEY</code> 提供真实密钥。仓库不会保存用户提供的 Key；程序也不自动读取 <code>.env</code>，需要在 shell、IDE 运行配置或进程管理器中设置环境。</p>
+<pre><code>export LLM_BASE_URL=&#x27;https://llm.aiaipool.com/v1&#x27;
+export LLM_MODEL=&#x27;deepseek-v41-flash&#x27;
+# 在当前终端安全输入，不把密钥写进命令历史
+read -s &#x27;LLM_API_KEY?请输入 API Key: &#x27;
+export LLM_API_KEY
+java -jar target/holmes-java-0.1.0.jar ask &#x27;分析 checkout 支付失败的原因&#x27; --trace</code></pre>
+<p>该输入示例使用 zsh 语法。进程启动后读取其环境变量；在其他终端修改变量，不会改变已经运行的 HTTP 服务配置。更换配置后需要重启服务。</p>
+<h3>2. 全部环境变量</h3>
+<table><thead><tr><th>变量</th><th>默认值</th><th>含义</th></tr></thead><tbody><tr><td><code>LLM_BASE_URL</code></td><td><code>https://llm.aiaipool.com/v1</code></td><td>OpenAI 兼容 API 根地址，不要重复添加 <code>/chat/completions</code></td></tr><tr><td><code>LLM_MODEL</code></td><td><code>deepseek-v41-flash</code></td><td>发送给接口的模型名称</td></tr><tr><td><code>LLM_API_KEY</code></td><td>无</td><td>真实调查必须设置；demo 不需要</td></tr><tr><td><code>LLM_TIMEOUT_SECONDS</code></td><td><code>90</code></td><td>一次模型 HTTP 请求超时，单位秒</td></tr><tr><td><code>HOLMES_MAX_STEPS</code></td><td><code>8</code></td><td>模型调用总轮次，包含最后收束轮，允许范围 2～100</td></tr><tr><td><code>HOLMES_MAX_TOOL_CALLS</code></td><td><code>24</code></td><td>一次调查的工具调用总预算</td></tr><tr><td><code>HOLMES_TOOL_TIMEOUT_SECONDS</code></td><td><code>15</code></td><td>单次命令工具执行时间上限</td></tr><tr><td><code>HOLMES_MAX_OUTPUT_CHARS</code></td><td><code>12000</code></td><td>单次工具输出字符上限</td></tr><tr><td><code>HOLMES_MAX_CONTEXT_CHARS</code></td><td><code>120000</code></td><td>调查消息总字符预算</td></tr><tr><td><code>HOLMES_TOOLS_FILE</code></td><td><code>config/tools.json</code></td><td>工具配置文件</td></tr><tr><td><code>HOLMES_RUNBOOKS_DIR</code></td><td><code>runbooks</code></td><td>Markdown 操作手册目录</td></tr><tr><td><code>HOLMES_PORT</code></td><td><code>8080</code></td><td>本地 HTTP 服务端口</td></tr></tbody></table>
+<p>路径默认按启动目录定位，工具配置中的 <code>fileRoot</code> 则相对于工具配置文件所在目录解析。命令行 <code>--tools</code>、<code>--runbooks</code>、<code>--max-steps</code>、<code>--port</code> 用于覆盖相应选项。运行时应从项目根目录启动，或者为这些路径使用明确的绝对路径。</p>
+<h3>3. 文件工具如何工作</h3>
+<p>默认配置的 <code>fileRoot</code> 指向 <code>../examples/evidence</code>；因为配置文件在 <code>config</code> 目录下，所以最终定位到项目中的示例证据目录。根目录是文件工具的范围边界，不是工作目录快捷方式。文件工具会防止绝对路径、父目录逃逸或符号链接把访问范围扩展到根目录之外。</p>
+<p>三个内置文件工具分别用于发现、读取和检索：<code>list_files</code> 无参数，列出可读证据；<code>read_file</code> 接收相对 <code>path</code>，返回文件内容；<code>search_files</code> 接收 <code>query</code>，进行忽略大小写的字面字符串搜索，返回路径、行号和匹配行，不支持正则。参数不能有额外字段。路径最长 512 字符，搜索词最长 200 字符。先发现或搜索，再读取相关文件，可以减少上下文占用。</p>
+<p>文件扫描最多检查 2000 个条目，目录深度最多 12；单文件最多读取 256 KiB，列表和搜索每次累计读取最多 8 MiB，并受输出字符上限限制。无效 UTF-8、二进制或不可读文件会被列表和搜索跳过。列表与搜索并不是无限覆盖整个目录，<code>truncated</code> 为 true 时需要注意遗漏。每次工具执行得到当时快照；同名同参数后续调用复用本次调查内的缓存。</p>
+<p>要接入自己的离线故障包，可以复制工具配置，将 <code>fileRoot</code> 指向专用目录，再使用 <code>--tools</code> 指定新文件。不需要修改调查引擎。建议每次调查的证据包含清楚的对象名称、采样时间、时区和来源，避免不同故障的数据混在一起。</p>
+<h3>4. 命令工具的扩展原则</h3>
+<p>命令工具用于把管理员已经认可的本机能力开放给模型，例如读取特定服务日志或查询集群事件。配置由管理员维护；模型只能选择已有工具并提供声明过的参数。执行使用 argv 列表，不能把整条命令作为 <code>sh -c</code> 字符串交给 shell。这样参数中的空格或 shell 元字符不会被当作新的命令执行。</p>
+<p>命令运行位置是 Java 进程所在机器，权限也是该进程的权限。依赖的命令、认证信息和网络连接必须在这台机器上已经可用。新工具应先用本机终端独立验证，再通过 <code>tools</code> 检查注册结果，最后发起范围明确的调查。文件工具的根目录限制只适用于文件工具，并不自动限制管理员配置的外部程序能访问什么。</p>
+<p>扩展时保持工具单一且可描述：工具名称稳定，说明清楚写出能返回什么，参数尽量少而具体，输出包含时间和对象信息。优先提供只读查询；较大命令输出在工具侧先按时间、对象或行数裁剪。程序的截断上限是兜底保护，不能替代合理查询。</p>
+<p>配置结构如下，所有命令参数都必须是字符串，配置 <code>pattern</code> 或 <code>enum</code>，声明为必填并用于 argv。工具名称和参数名称只允许字母开头的字母、数字与下划线。模型不能修改可执行文件名；参数值不能以 <code>-</code> 开头，从而减少将对象名称误当作新选项的风险。</p>
+<pre><code>{
+  &quot;fileRoot&quot;: &quot;../examples/evidence&quot;,
+  &quot;commands&quot;: [
+    {
+      &quot;name&quot;: &quot;k8s_get_pods&quot;,
+      &quot;description&quot;: &quot;列出指定命名空间的 Pod 状态（只读）&quot;,
+      &quot;parameters&quot;: {
+        &quot;type&quot;: &quot;object&quot;,
+        &quot;properties&quot;: {
+          &quot;namespace&quot;: {
+            &quot;type&quot;: &quot;string&quot;,
+            &quot;pattern&quot;: &quot;[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?&quot;,
+            &quot;maxLength&quot;: 63
+          }
+        },
+        &quot;required&quot;: [&quot;namespace&quot;]
+      },
+      &quot;argv&quot;: [&quot;kubectl&quot;, &quot;get&quot;, &quot;pods&quot;, &quot;--namespace&quot;, &quot;{namespace}&quot;,
+               &quot;--output&quot;, &quot;wide&quot;, &quot;--request-timeout=15s&quot;]
+    }
+  ]
+}</code></pre>
+<p>仓库的 <code>config/tools-kubernetes.json</code> 还包含 Pod 详情和最近 200 行容器日志工具。它的 <code>fileRoot</code> 指向 <code>../data/evidence</code> 空目录，避免在真实集群调查时把示例事故误作生产证据。使用它前，本机需要可用的 <code>kubectl</code> 与对应集群认证，再运行 <code>ask &#x27;调查某命名空间的故障&#x27; --tools config/tools-kubernetes.json</code>。命令工作目录是 <code>fileRoot</code>，stdout 和 stderr 合并收集；非零退出码、超时会返回失败结果。启动子进程时会去除模型与 Holmes 服务相关的密钥环境变量，保留集群认证所需的其他环境。</p>
+<h3>5. Markdown 手册的维护方式</h3>
+<p><code>runbooks/oom.md</code> 给出内存故障调查方法。手册应写“怎样判断”，证据文件应写“这次观察到什么”。不要把长期过时的生产事实、真实 API Key 或大段历史日志放进手册。修改手册后，以新的调查请求验证它是否影响了工具选择和答案结构。</p>
+<p>当前没有复杂检索，准备引擎时按文件名排序读取目录顶层的小型 <code>.md</code> 普通文件，不递归加载子目录，也不读取符号链接。最多 20 个文件，单文件不超过 80000 字节，合计不超过 20000 字符；目录不存在或超限会报错。HTTP 运行中修改手册需要重启。目录里堆积很多手册会挤占日志证据的空间，建议按常见故障写简短章节，将业务特定规则明确标为适用条件。</p>
+<h3>6. HTTP 接口</h3>
+<pre><code>java -jar target/holmes-java-0.1.0.jar serve --port 8080
+curl -s http://127.0.0.1:8080/health
+curl -s http://127.0.0.1:8080/api/investigate \
+  -H &#x27;Content-Type: application/json&#x27; \
+  -d &#x27;{&quot;question&quot;:&quot;checkout 服务为什么支付失败？&quot;}&#x27;</code></pre>
+<p>服务监听 <code>127.0.0.1</code>，适合本机开发和调试。健康检查只验证本地服务是否响应，不代表上游模型、命令工具或生产数据源全部可用。调查接口同步等待一次调查完成，返回 <code>answer</code>、<code>steps</code>、<code>toolCalls</code>、<code>stopReason</code> 和 <code>trace</code>。调用者应同时检查停止原因与答案，不能只读取 <code>answer</code> 就认为调查完整。</p>
+<p>调查接口最多允许 4 个并发调查，超过时返回 429；请求体最多 64 KiB，问题不能为空且不能超过 16000 字符。错误响应为 <code>{&quot;error&quot;:&quot;原因&quot;}</code>；400 表示参数或 JSON 无效，404 表示路径不存在，405 表示方法错误，413 表示请求体过大，502 表示上游模型网络或协议错误，503 表示调查被中断，500 表示内部异常。</p>
+<p>当前接口没有身份认证、按用户限流、持久化队列或多租户权限。若将它接入团队服务，应先根据实际场景增加认证、审计与证据范围隔离，再考虑网络暴露。错误排查时区分 HTTP 请求格式问题、本地工具问题和上游模型错误。</p>
+<p>模型客户端最多尝试 3 次，仅对 429、502、503、504 短暂退避重试；网络失败和超时不自动重试。一次模型响应最多 2 MiB。HTTP 重试是同一轮模型调用的网络尝试，不会增加结果中的 <code>steps</code>。</p>
+<h3>7. 验证和常见故障</h3>
+<p>验证顺序为构建与测试 → 离线 demo → 查看工具列表 → 配置真实模型 → 发起小范围真实问题。demo 成功说明本地循环与示例文件工具可运行；真实 API 成功还需要验证 Base URL、模型名称、Key 和网络。任何外部请求结果应以实际运行记录为准，不能用 demo 替代。</p>
+<table><thead><tr><th>现象</th><th>优先检查</th></tr></thead><tbody><tr><td>提示缺少 API Key</td><td>启动进程是否获得 <code>LLM_API_KEY</code>；是否修改环境后重启</td></tr><tr><td>401 / 403</td><td>Key 是否有效、接口是否授权该模型；避免在排错输出中打印完整密钥</td></tr><tr><td>404</td><td>Base URL 是否已包含 <code>/v1</code>；是否重复添加端点路径</td></tr><tr><td>模型名称错误</td><td>服务商是否提供完全相同的模型标识</td></tr><tr><td>模型响应无效或不支持工具</td><td>上游是否兼容 Chat Completions 和 <code>tool_calls</code></td></tr><tr><td>文件找不到</td><td>启动目录、<code>--tools</code> 路径及 <code>fileRoot</code> 的配置目录相对关系</td></tr><tr><td>命令失败 / 超时</td><td>本机可执行程序、认证、参数与网络；适当缩小查询范围</td></tr><tr><td>结论缺少证据</td><td>trace 是否取到相关数据；输出是否截断；问题是否明确</td></tr><tr><td><code>budget_exceeded</code></td><td>工具是否重复调用、证据是否过大；先改善工具和问题再提高预算</td></tr></tbody></table>
+<h3>8. 后续扩展顺序</h3>
+<p>首先补齐实际需要的只读工具与短手册，其次增加模型协议契约测试、上游错误分类和请求审计。确实需要长期会话时再引入历史存储，需要大量知识文档时再引入检索。把平台能力按真实需求逐步加入，能保持主循环易读，并避免把原项目全部复杂度一次带回 Java 版本。</p>
+<h2>四、原项目源码与取舍</h2>
+<h3>1. 对照基准与重写目标</h3>
+<p>参考仓库是 <a href="https://github.com/allenflux/holmesgpt">allenflux/holmesgpt</a>，本次分析固定到 commit <code>465a54e900feca85cab8a39c82d5ab6f2238cad6</code>，避免上游后续变化造成文档与源码不一致。原项目使用 Python，面向 Kubernetes 和 SRE 故障调查，并包含多种集成与服务能力。</p>
+<p>Java 版本保留“通过工具证据驱动模型调查”的核心，重新组织为较小的本地应用。它不是 Python 模块逐行翻译，也不承诺兼容原版配置、API、插件和部署方式。目标是让读者能完整掌握一次调查如何启动、模型如何决定取证、程序如何执行工具，以及最终答案如何产生。</p>
+<h3>2. 原版主路径</h3>
+<p>原项目有 CLI、HTTP 和告警调查入口。CLI <code>ask</code> 处理人工问题；HTTP <code>/api/chat</code> 支持会话请求；告警入口从 issue 内容构造调查上下文。入口加载配置与可用 toolsets，组合调查系统提示、用户问题、历史以及 skills/runbook 指引，然后进入统一的工具调用模型循环。</p>
+<p>核心循环把 <code>messages</code> 与工具定义发给模型。模型若返回工具调用，就执行对应工具，把每份结果以 <code>role=tool</code> 和对应 <code>tool_call_id</code> 加回对话；再请求模型继续推理。模型没有继续请求工具时输出报告。原版还包含并行工具执行、流式输出、历史上下文压缩、遥测与持久化等工程机制。</p>
+<p>固定版本中的知识指引已经演化为 Skills 目录：先让模型看到可用技能目录或摘要，再通过 <code>fetch_skill</code> 按需读取相关正文。因此不能把当前原版描述为“一开始把全部手册全文放进 prompt”。Java 精简版故意选择直接注入少量 Markdown，省去按需加载协议。</p>
+<h3>3. 关键源码入口</h3>
+<p>以下链接均固定到本次分析的 commit，可直接跳转核对。</p>
+<table><thead><tr><th>原版文件</th><th>职责与阅读位置</th></tr></thead><tbody><tr><td><a href="https://github.com/allenflux/holmesgpt/blob/465a54e900feca85cab8a39c82d5ab6f2238cad6/holmes/main.py#L194">main.py</a></td><td>CLI ask；后续加载配置、构造 AI 并调用调查</td></tr><tr><td><a href="https://github.com/allenflux/holmesgpt/blob/465a54e900feca85cab8a39c82d5ab6f2238cad6/server.py#L593">server.py</a></td><td><code>/api/chat</code> 入口、会话消息、流式与同步响应</td></tr><tr><td><a href="https://github.com/allenflux/holmesgpt/blob/465a54e900feca85cab8a39c82d5ab6f2238cad6/holmes/config.py#L274">config.py</a></td><td>YAML/环境与 CLI 配置，工具执行器和模型初始化</td></tr><tr><td><a href="https://github.com/allenflux/holmesgpt/blob/465a54e900feca85cab8a39c82d5ab6f2238cad6/holmes/core/prompt.py#L206">core/prompt.py</a></td><td>系统与用户调查提示的组合</td></tr><tr><td><a href="https://github.com/allenflux/holmesgpt/blob/465a54e900feca85cab8a39c82d5ab6f2238cad6/holmes/core/tool_calling_llm.py#L1221">core/tool_calling_llm.py</a></td><td>核心循环、末轮收束、压缩、工具执行与结果回填</td></tr><tr><td><a href="https://github.com/allenflux/holmesgpt/blob/465a54e900feca85cab8a39c82d5ab6f2238cad6/holmes/core/models.py#L19">core/models.py</a></td><td>工具与对话结果的数据结构</td></tr><tr><td><a href="https://github.com/allenflux/holmesgpt/blob/465a54e900feca85cab8a39c82d5ab6f2238cad6/holmes/plugins/skills/skill_loader.py#L497">plugins/skills/skill_loader.py</a></td><td>Skills 目录与加载</td></tr><tr><td><a href="https://github.com/allenflux/holmesgpt/blob/465a54e900feca85cab8a39c82d5ab6f2238cad6/holmes/plugins/toolsets/skills/skills_fetcher.py#L192">plugins/toolsets/skills/skills_fetcher.py</a></td><td><code>fetch_skill</code> 工具按需返回正文</td></tr></tbody></table>
+<h3>4. Java 组件映射</h3>
+<table><thead><tr><th>Java 组件</th><th>保留的职责</th><th>简化方式</th></tr></thead><tbody><tr><td><code>Main</code></td><td>CLI 参数、启动与输出</td><td>四个命令，直接调用共享引擎</td></tr><tr><td><code>AppConfig</code></td><td>模型、路径与预算配置</td><td>环境变量及少数 CLI 覆盖，无大型 YAML 层</td></tr><tr><td><code>AgentEngine</code></td><td>消息列表与取证循环</td><td>顺序工具执行、有限预算、简单重复调用缓存</td></tr><tr><td><code>LlmClient</code> / <code>OpenAiClient</code></td><td>模型调用接口与实现</td><td>只支持 OpenAI 兼容 Chat Completions</td></tr><tr><td><code>ToolRegistry</code></td><td>工具说明、校验、分发和执行</td><td>内置文件工具及 argv 命令，无插件发现机制</td></tr><tr><td><code>ToolResult</code></td><td>工具输出和执行状态</td><td><code>success/output/truncated</code> 三个字段</td></tr><tr><td><code>Runbooks</code></td><td>调查知识指引</td><td>顶层少量 Markdown 直接进入系统提示</td></tr><tr><td><code>HttpApi</code></td><td>本地请求入口</td><td>同步 JSON，独立请求上下文</td></tr><tr><td><code>DemoLlm</code></td><td>可重复的离线演示</td><td>脚本模型配真实文件工具</td></tr><tr><td><code>Json</code></td><td>JSON 编解码</td><td>集中复用 Jackson mapper</td></tr></tbody></table>
+<h3>5. 哪些能力保留，哪些暂不实现</h3>
+<table><thead><tr><th>能力</th><th>原版</th><th>Java 精简版</th></tr></thead><tbody><tr><td>工具驱动调查循环</td><td>有</td><td>保留核心协议</td></tr><tr><td>取证消息配对</td><td><code>tool_call_id</code></td><td>保留</td></tr><tr><td>CLI 调查</td><td>有</td><td><code>ask/demo/tools/serve</code></td></tr><tr><td>HTTP 调查</td><td><code>/api/chat</code>，含流式等</td><td><code>/api/investigate</code>，同步 JSON</td></tr><tr><td>多模型供应商</td><td>LiteLLM 等适配</td><td>一个兼容接口</td></tr><tr><td>本机与平台工具</td><td>丰富 toolsets</td><td>文件工具与管理员配置的 argv</td></tr><tr><td>Markdown 指引</td><td>Skills 目录与按需加载</td><td>少量全文直接加载</td></tr><tr><td>预算与保护</td><td>多层预算与压缩</td><td>明确轮次、工具、字符和超时限制</td></tr><tr><td>工具并行</td><td>支持</td><td>顺序执行</td></tr><tr><td>上下文压缩</td><td>支持</td><td>不实现，超限明确停止</td></tr><tr><td>MCP / OAuth / 云监控</td><td>有相关集成</td><td>不实现</td></tr><tr><td>Operator / 告警 / 回写</td><td>有相关工作流</td><td>不实现</td></tr><tr><td>历史持久化 / Robusta / Supabase</td><td>有相关能力</td><td>不实现</td></tr><tr><td>TUI / 图像 / 遥测计费</td><td>有相关能力</td><td>不实现</td></tr></tbody></table>
+<p>没有内建生产集成并不妨碍接入只读证据，但需要显式配置工具。例如 Kubernetes 示例配置依赖本机 <code>kubectl</code>，不是自动安装 Operator 或自动获取集群权限。原版工具 YAML 也不能直接复制到 Java JSON 配置中，必须按 Java schema 重新声明工具参数与 argv。</p>
+<h3>6. 取舍与后续演进</h3>
+<p>精简后最明显的收益是启动和调试链路短，依赖少，一次调查的全部状态都在内存中可见。代价是长会话、复杂平台集成、细粒度权限、审计和运营能力需要后续补充。对当前学习与小型本地排障场景，这个取舍让核心行为更清楚。</p>
+<p>后续应以真实需求驱动扩展：先接实际证据，再提高协议可靠性和可观察性；有长期会话需求时增加持久化；有大量指引时增加检索；有多人访问需求时增加认证与隔离。每次新增能力都应能指出它改变了主循环的哪一处，而不是先复制原版所有基础设施。</p>
+<h3>7. 许可证与来源</h3>
+<p>原项目采用 Apache-2.0；参考版本的 LICENSE 包含 <code>Copyright 2025 Robusta Dev LTD</code>，根目录没有额外 NOTICE 文件。重写与再分发时应保留适用的许可证和来源说明。上述对照用于解释设计来源，不能替代逐项检查引入代码或资源的许可要求。</p>
+<h2>五、验证记录</h2>
+<p>验证日期：2026-10-14。以下区分本地演示、真实模型调用与真实生产环境；示例故障证据全部为人工构造。</p>
+<p>下列“离线演示”“真实模型接口”“自动化与图表”保留 JDK 27 迁移前的验证历史；JDK 27 的验证结果单独记录于末尾，不能由这些历史结果推定。</p>
+<h3>离线演示</h3>
+<p>执行 <code>java -jar target/holmes-java-0.1.0.jar demo --trace</code>，使用脚本模型，完成 3 轮模型调用、2 次真实文件工具调用，结束状态 <code>completed</code>。流程为列出证据，再读取 <code>pod-events.log</code>，输出 <code>queue-worker-demo</code> 的 OOM 调查示例。演示没有访问真实集群。</p>
+<h3>真实模型接口</h3>
+<p>使用 <code>https://llm.aiaipool.com/v1</code> 和 <code>deepseek-v41-flash</code> 对人工支付故障包发起真实调查。已完成 3 轮模型调用、4 次工具调用，结束状态 <code>completed</code>。工具路径是 <code>list_files</code>，再读取 <code>incident.md</code>、<code>application.log</code> 和 <code>deployment.yaml</code>。</p>
+<p>模型识别 <code>PAYMENT_API_URL</code> 与 <code>PAYMENT_URL</code> 键名不一致，联系日志中的 <code>localhost:8081</code> 回退、<code>ConnectionRefused</code> 和 HTTP 500 解释支付失败；同时明确独立的 <code>queue-worker-demo</code> OOM 证据不能作为 checkout 支付事故的原因。这验证了指定接口与工具调用协议在本次请求中可用，不代表已经连接或验证真实生产环境。</p>
+<h3>自动化与图表</h3>
+<p>本地 Maven 测试覆盖调查循环、预算收束、工具参数、文件边界、输出截断、HTTP 错误和模型协议等关键路径，核心 25 项、工具 10 项，共 35 项，全部通过；Maven package 已生成可执行 JAR。两张 HTML 图已经通过 Diagram Design <code>self_check.py</code>，PNG 按 1280×720 画布的 2 倍分辨率导出，并经过视觉检查。</p>
+<h3>JDK 27 迁移验证</h3>
+<p>迁移日期：2026-10-14。目标构建与运行版本已调整为 JDK 27。</p>
+<p>已使用本机 Homebrew OpenJDK 27（build 27）完成迁移验证；Maven 3.10.0 的运行 Java 版本为 27。清理后执行 mvn clean package，35 项测试全部通过，生成可执行 JAR。编译产物的 class major version 为 71，确认目标为 Java 27。离线 demo 完成 3 轮模型调用、2 次文件工具调用，状态 completed；CLI 帮助显示 JDK 27。HTTP 健康接口及模型协议已由本轮自动化测试覆盖。本轮未重复调用外部 LLM，真实模型验证沿用上文迁移前记录。</p>
+<h2>六、配套图表</h2>
+<h3>Holmes Java 精简架构</h3>
+<p>图中保留 7 个核心组件，突出调查引擎。蓝色连接是外部模型 API；工具执行发生在 Java 所在机器，执行结果写回同一消息列表。</p>
+<h3>从问题到调查结论</h3>
+<p>图中保留 9 个节点，合并不同预算的细节。最终收束包含在 maxSteps 内；上下文已经超过上限时直接停止。文件与命令工具的内部校验请结合上文阅读。</p></body></html>

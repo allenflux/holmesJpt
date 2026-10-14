@@ -1,0 +1,44 @@
+{
+  "fileRoot": "../data/evidence",
+  "commands": [
+    {
+      "name": "k8s_get_pods",
+      "description": "列出指定命名空间的 Pod 状态（只读）。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "namespace": {"type": "string", "description": "Kubernetes 命名空间", "pattern": "[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", "maxLength": 63}
+        },
+        "required": ["namespace"]
+      },
+      "argv": ["kubectl", "get", "pods", "--namespace", "{namespace}", "--output", "wide", "--request-timeout=15s"]
+    },
+    {
+      "name": "k8s_describe_pod",
+      "description": "读取指定 Pod 的详情与事件（只读）。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "namespace": {"type": "string", "pattern": "[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", "maxLength": 63},
+          "pod": {"type": "string", "pattern": "[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?", "maxLength": 253}
+        },
+        "required": ["namespace", "pod"]
+      },
+      "argv": ["kubectl", "describe", "pod", "{pod}", "--namespace", "{namespace}", "--request-timeout=15s"]
+    },
+    {
+      "name": "k8s_pod_logs",
+      "description": "读取指定容器的最近 200 行日志（只读，不持续跟随）。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "namespace": {"type": "string", "pattern": "[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", "maxLength": 63},
+          "pod": {"type": "string", "pattern": "[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?", "maxLength": 253},
+          "container": {"type": "string", "pattern": "[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", "maxLength": 63}
+        },
+        "required": ["namespace", "pod", "container"]
+      },
+      "argv": ["kubectl", "logs", "{pod}", "--container", "{container}", "--namespace", "{namespace}", "--tail=200", "--timestamps=true", "--request-timeout=15s"]
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+# 人工构造的离线演示配置，不用于直接部署。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: checkout-api
+  namespace: demo-shop
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: checkout-api
+  template:
+    metadata:
+      labels:
+        app: checkout-api
+    spec:
+      containers:
+        - name: checkout-api
+          image: example.invalid/checkout-api:v2
+          env:
+            # 应用 v2 已改用 PAYMENT_API_URL，这里仍保留旧变量名。
+            - name: PAYMENT_URL
+              value: http://payment-service:8080
