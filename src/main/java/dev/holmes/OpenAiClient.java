@@ -27,7 +27,7 @@ public final class OpenAiClient implements LlmClient {
     private final HttpClient http;
 
     public OpenAiClient(AppConfig config) {
-        if (config.apiKey().isBlank()) throw new IllegalArgumentException("请先设置 LLM_API_KEY 环境变量");
+        if (config.apiKey().isBlank()) throw new IllegalArgumentException("请先在 .env 文件或系统环境中配置 LLM_API_KEY");
         this.config = config;
         this.http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(15))
                 .followRedirects(HttpClient.Redirect.NEVER).build();

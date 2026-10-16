@@ -1,0 +1,15 @@
+{$HOLMES_DOMAIN} {
+	encode zstd gzip
+	header -Server
+
+	# 页面、登录、日志批次和通用问答走同一站点，保留 Host 与 Cookie。
+	reverse_proxy app:8080 {
+		transport http {
+			dial_timeout 5s
+			# 通用问答同步等待模型与工具；日志批次本身使用异步轮询。
+			response_header_timeout 45m
+			read_timeout 45m
+			write_timeout 45m
+		}
+	}
+}

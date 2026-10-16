@@ -1,16 +1,17 @@
 package dev.holmes;
 
+import java.io.IOException;
 import java.net.URI;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Map;
 
-/** 集中管理运行参数；密钥只从环境变量读取。 */
+/** 集中管理运行参数；支持启动目录 .env 与系统环境变量。 */
 public record AppConfig(URI baseUrl, String apiKey, String model, Duration llmTimeout,
                         int maxSteps, int maxToolCalls, int toolTimeoutSeconds,
                         int maxOutputChars, int maxContextChars, Path toolsFile,
                         Path runbooksDir, int port) {
-    public static AppConfig load() { return from(System.getenv()); }
+    public static AppConfig load() throws IOException { return from(EnvironmentConfig.load()); }
 
     public static AppConfig from(Map<String, String> env) {
         URI base = URI.create(value(env, "LLM_BASE_URL", "https://llm.aiaipool.com/v1"));

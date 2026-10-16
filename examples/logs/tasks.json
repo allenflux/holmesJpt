@@ -1,0 +1,140 @@
+{
+  "source": "scheduler-victorialogs",
+  "namespace": "prod",
+  "scheduler_instance": "scheduler-synthetic-v1",
+  "observed_at": "2026-10-15T06:00:00Z",
+  "tasks": [
+    {
+      "task_id": "task-A",
+      "status": "failed",
+      "attempts": [
+        {
+          "attempt_id": "attempt-A-1",
+          "prompt_id": "prompt-A-1",
+          "started_at": "2026-10-15T05:01:00Z",
+          "instance_id": "worker-A-1",
+          "ended_at": "2026-10-15T05:04:00Z"
+        },
+        {
+          "attempt_id": "attempt-A-2",
+          "prompt_id": "prompt-A-2",
+          "started_at": "2026-10-15T05:10:00Z",
+          "instance_id": "worker-A-2",
+          "ended_at": "2026-10-15T05:14:00Z"
+        }
+      ],
+      "final_attempt_id": "attempt-A-2",
+      "status_version": "synthetic-A-v2",
+      "failed_at": "2026-10-15T05:14:00Z"
+    },
+    {
+      "task_id": "task-B",
+      "status": "failed",
+      "attempts": [
+        {
+          "attempt_id": "attempt-B-1",
+          "prompt_id": "prompt-B-1",
+          "started_at": "2026-10-15T05:20:00Z",
+          "instance_id": "worker-B-1",
+          "ended_at": "2026-10-15T05:24:00Z"
+        }
+      ],
+      "final_attempt_id": "attempt-B-1",
+      "status_version": "synthetic-B-v1",
+      "failed_at": "2026-10-15T05:24:00Z"
+    },
+    {
+      "task_id": "task-C",
+      "status": "failed",
+      "attempts": [
+        {
+          "attempt_id": "attempt-C-1",
+          "prompt_id": "prompt-C-1",
+          "started_at": "2026-10-15T05:30:00Z",
+          "instance_id": "worker-C-1",
+          "ended_at": "2026-10-15T05:34:00Z"
+        }
+      ],
+      "final_attempt_id": "attempt-C-1",
+      "status_version": "synthetic-C-v1",
+      "failed_at": "2026-10-15T05:34:00Z"
+    },
+    {
+      "task_id": "task-D",
+      "status": "failed",
+      "attempts": [
+        {
+          "attempt_id": "attempt-D-1",
+          "prompt_id": "prompt-D-1",
+          "started_at": "2026-10-15T05:35:00Z",
+          "instance_id": "worker-D-1",
+          "ended_at": "2026-10-15T05:39:00Z"
+        }
+      ],
+      "final_attempt_id": "attempt-D-1",
+      "status_version": "synthetic-D-v1",
+      "failed_at": "2026-10-15T05:39:00Z"
+    },
+    {
+      "task_id": "task-E",
+      "status": "failed",
+      "attempts": [
+        {
+          "attempt_id": "attempt-E-1",
+          "prompt_id": "prompt-E-1",
+          "started_at": "2026-10-15T05:40:00Z",
+          "instance_id": "worker-E-1",
+          "ended_at": "2026-10-15T05:44:00Z"
+        }
+      ],
+      "final_attempt_id": "attempt-E-1",
+      "status_version": "synthetic-E-v1",
+      "failed_at": "2026-10-15T05:44:00Z"
+    },
+    {
+      "task_id": "task-F",
+      "status": "failed",
+      "attempts": [
+        {
+          "attempt_id": "attempt-F-1",
+          "prompt_id": "prompt-F-1",
+          "started_at": "2026-10-15T05:45:00Z",
+          "instance_id": "worker-F-1",
+          "ended_at": "2026-10-15T05:49:00Z"
+        }
+      ],
+      "final_attempt_id": "attempt-F-1",
+      "status_version": "synthetic-F-v1",
+      "failed_at": "2026-10-15T05:49:00Z"
+    },
+    {
+      "task_id": "task-G",
+      "status": "succeeded",
+      "attempts": [
+        {
+          "attempt_id": "attempt-G-1",
+          "prompt_id": "prompt-G-1",
+          "started_at": "2026-10-15T05:50:00Z",
+          "instance_id": "worker-G-1",
+          "ended_at": "2026-10-15T05:55:00Z"
+        }
+      ],
+      "final_attempt_id": "attempt-G-1",
+      "status_version": "synthetic-G-v1"
+    },
+    {
+      "task_id": "task-running",
+      "status": "running",
+      "attempts": [
+        {
+          "attempt_id": "attempt-running-1",
+          "prompt_id": "prompt-running-1",
+          "started_at": "2026-10-15T05:58:00Z",
+          "instance_id": "worker-running-1"
+        }
+      ],
+      "final_attempt_id": "attempt-running-1",
+      "status_version": "synthetic-running-v1"
+    }
+  ]
+}

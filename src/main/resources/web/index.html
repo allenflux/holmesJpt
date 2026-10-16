@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Holmes</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css" integrity="sha384-sRIl4kxILFvY47J16cr9ZwB07vP4J8+LH7qKQnuqkuIAvNWLzeN8tE5YBujZqJLB" crossorigin="anonymous">
+  <link rel="stylesheet" href="/styles.css">
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/js/bootstrap.bundle.min.js" integrity="sha384-FKyoEForCGlyvwx9Hj09JcYn3nv7wiPVlz7YYwJrWVcXK/BmnVDxM+D2scQbITxI" crossorigin="anonymous" defer></script>
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="navbar navbar-expand navbar-dark py-0 brand-bar">
+    <div class="container-fluid shell-width px-3 px-md-4 h-100 gap-3 gap-md-4">
+      <a class="navbar-brand m-0 fs-5 fw-semibold d-flex align-items-center" href="/" aria-label="Holmes home" data-i18n-aria="home"><span class="brand-mark border border-2 border-white rounded d-inline-flex justify-content-center align-items-center lh-1 me-2 fs-6" aria-hidden="true">H</span>Holmes</a>
+      <nav id="navigation" class="navbar-nav flex-row gap-3 me-auto h-100" aria-label="Main navigation" data-i18n-aria="mainNavigation" hidden>
+        <button class="nav-link active border-0 bg-transparent px-0" type="button" data-view="logs" aria-current="page" data-i18n="logAnalysis">Log analysis</button>
+        <button class="nav-link border-0 bg-transparent px-0" type="button" data-view="ask" data-i18n="generalAsk">Ask Holmes</button>
+      </nav>
+      <div class="d-flex align-items-center gap-3 ms-auto">
+        <select id="language" class="form-select form-select-sm w-auto" aria-label="Language" data-i18n-aria="language"><option value="en">English</option><option value="zh">中文</option></select>
+        <button id="logout" class="btn btn-link btn-sm text-white text-decoration-none p-0" type="button" data-i18n="logout" hidden>Sign out</button>
+      </div>
+    </div>
+  </header>
+  <main class="container page-width px-3 px-md-4 py-4 py-md-5">
+    <section id="login-view" class="login-width mx-auto mt-4" aria-labelledby="login-heading" hidden>
+      <div class="card"><div class="card-body p-4">
+        <h1 id="login-heading" class="h4 mb-2" data-i18n="loginTitle">Sign in to Holmes</h1>
+        <p class="text-secondary small mb-4" data-i18n="loginIntro">Enter your access password to continue.</p>
+        <form id="login-form">
+          <label class="form-label small" for="password" data-i18n="password">Access password</label>
+          <input id="password" class="form-control" name="password" type="password" autocomplete="current-password" required>
+          <p id="login-error" class="text-danger small mt-3" role="alert" hidden></p>
+          <button id="login-submit" class="btn btn-primary w-100 mt-3" type="submit" data-i18n="login">Sign in</button>
+        </form>
+      </div></div>
+    </section>
+    <div id="app-view" hidden>
+      <div id="global-notice" class="alert alert-danger py-2 small" role="alert" hidden></div>
+      <section id="logs-view" aria-labelledby="logs-heading">
+        <div class="d-flex flex-wrap justify-content-between align-items-start gap-3 mb-4">
+          <div><h1 id="logs-heading" class="h3 mb-2" data-i18n="logAnalysis">Log analysis</h1><p class="text-secondary mb-0" data-i18n="logIntro">Connect task logs across Pods and review shared failure patterns.</p></div>
+          <span id="data-badge" class="badge text-bg-light border text-secondary fw-normal" data-i18n="loadingConfig">Loading configuration</span>
+        </div>
+        <div id="snapshot-notice" class="alert alert-light border py-2 small" role="status"></div>
+        <section class="card mb-4" aria-labelledby="new-heading"><div class="card-body p-3 p-md-4">
+          <h2 id="new-heading" class="h5 mb-4" data-i18n="newAnalysis">New analysis</h2>
+          <form id="analysis-form">
+            <div class="row g-3 mb-3">
+              <div class="col-md-6"><label class="form-label small" for="source" data-i18n="logSource">Log source</label><input id="source" class="form-control bg-light" type="text" readonly></div>
+              <div class="col-md-6"><label class="form-label small" for="namespace">Namespace</label><select id="namespace" class="form-select" required></select></div>
+            </div>
+            <fieldset class="mb-3"><legend class="form-label small mb-2" data-i18n="selectTasks">Select tasks</legend><div class="d-flex flex-wrap gap-4">
+              <div class="form-check"><input id="mode-latest" class="form-check-input" type="radio" name="selection-mode" value="latest_failed" checked><label id="latest-mode-label" class="form-check-label small" for="mode-latest" data-i18n="latestFailed">Latest failed tasks</label></div>
+              <div class="form-check"><input id="mode-explicit" class="form-check-input" type="radio" name="selection-mode" value="explicit_task_ids"><label class="form-check-label small" for="mode-explicit" data-i18n="explicitTasks">Specific task IDs</label></div>
+            </div></fieldset>
+            <div id="count-field" class="mb-3"><label class="form-label small" for="requested-count" data-i18n="taskCount">Task count</label><input id="requested-count" class="form-control count-input" type="number" min="1" max="50" step="1" value="20" required><div class="form-text" data-i18n="taskCountHint">Up to 50. If fewer failed tasks are available, the actual count is used.</div></div>
+            <div id="ids-field" class="mb-3" hidden><label class="form-label small" for="task-ids">Task IDs</label><textarea id="task-ids" class="form-control" rows="3" placeholder="One per line, or separated by commas" data-i18n-placeholder="taskIdsPlaceholder" spellcheck="false"></textarea><div class="form-text" data-i18n="taskIdsHint">Up to 50 unique tasks. Duplicate IDs count once.</div></div>
+            <div class="row g-3"><div class="col-md-6"><label class="form-label small" for="from" data-i18n="from">Start time</label><input id="from" class="form-control" type="datetime-local" step="0.001" required></div><div class="col-md-6"><label class="form-label small" for="to" data-i18n="to">End time</label><input id="to" class="form-control" type="datetime-local" step="0.001" required></div></div>
+            <div id="timezone-hint" class="form-text"></div>
+            <div id="source-time-hint" class="form-text mt-2" hidden></div>
+            <div class="form-check mt-4"><input id="raw-archive" class="form-check-input" type="checkbox"><label class="form-check-label small" for="raw-archive" data-i18n="archiveChoice">Save this collection to FluxDrop</label></div>
+            <div class="form-text" data-i18n="archiveHint">Otherwise, only the report and key excerpts are kept. Archive failures are reported explicitly.</div>
+            <p id="analysis-error" class="text-danger small mt-3" role="alert" hidden></p>
+            <div class="d-flex flex-wrap align-items-center gap-3 mt-4"><button id="analysis-submit" class="btn btn-primary" type="submit" disabled data-i18n="startAnalysis">Start analysis</button><span id="submit-hint" class="text-secondary small"></span></div>
+          </form>
+        </div></section>
+        <details class="mb-4 small"><summary class="text-secondary" data-i18n="restoreBatch">Open an existing batch</summary><form id="restore-form" class="row g-2 align-items-end mt-2"><div class="col-sm"><label class="form-label small" for="restore-id" data-i18n="batchId">Batch ID</label><input id="restore-id" class="form-control" type="text" spellcheck="false" autocomplete="off" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" required></div><div class="col-sm-auto"><button id="restore-submit" class="btn btn-outline-secondary" type="submit" data-i18n="openBatch">Open batch</button></div></form><p id="restore-error" class="text-danger small mt-2" role="alert" hidden></p></details>
+        <section id="report-section" aria-labelledby="report-heading" hidden>
+          <div class="d-flex justify-content-between align-items-center gap-3 mb-2"><h2 id="report-heading" class="h5 mb-0" data-i18n="results">Analysis results</h2><span id="batch-state" class="badge text-bg-light border fw-normal"></span></div>
+          <div class="d-flex flex-wrap justify-content-between gap-2 mb-3 small"><span id="batch-id" class="font-monospace text-secondary"></span><button id="download-report" class="btn btn-link btn-sm p-0 text-decoration-none" type="button" data-i18n="downloadReport">Download JSON report</button></div>
+          <div class="d-flex align-items-center gap-3 mb-3"><div class="progress flex-grow-1" role="progressbar" aria-label="Task progress" data-i18n-aria="taskProgress" aria-valuemin="0" aria-valuemax="1" aria-valuenow="0"><div id="batch-progress" class="progress-bar"></div></div><span id="batch-progress-text" class="small text-secondary text-nowrap" aria-live="polite"></span></div>
+          <p id="report-summary" class="mb-2"></p><p id="report-counts" class="text-secondary small mb-4"></p>
+          <div id="poll-error" class="alert alert-danger small" role="alert" hidden><p id="poll-error-text"></p><button id="retry-poll" class="btn btn-outline-secondary btn-sm" type="button" data-i18n="retry">Retry</button></div>
+          <div id="quality-section" class="alert alert-light border small" hidden><h3 class="h6" data-i18n="evidenceQuality">Evidence scope and gaps</h3><ul id="quality-list" class="mb-0"></ul><details id="quality-technical" class="mt-2" hidden><summary data-i18n="technicalDetails">Technical details</summary><ul id="quality-technical-list" class="mt-2 mb-0"></ul></details></div>
+          <section class="card mb-4" aria-labelledby="clusters-heading"><div class="card-body p-3 p-md-4"><h3 id="clusters-heading" class="h6" data-i18n="failureClusters">Failure patterns</h3><p class="form-text mb-2" data-i18n="clusterHint">Percentages use all selected failed tasks. A failure signature describes an observation, not a proven shared root cause.</p><div id="clusters"></div></div></section>
+          <section id="observed-section" class="card mb-4" aria-labelledby="observed-heading" hidden><div class="card-body p-3 p-md-4"><h3 id="observed-heading" class="h6" data-i18n="observedPatterns">Observed error patterns</h3><p class="form-text mb-2" data-i18n="observedClustersHint">These are task-level observations; final attempts and retries are not verified. One task may appear in several groups, so counts and percentages can overlap.</p><div id="observed-clusters"></div></div></section>
+          <section class="card mb-4" aria-labelledby="tasks-heading"><div class="card-body p-3 p-md-4"><h3 id="tasks-heading" class="h6" data-i18n="failedTasks">Failed tasks</h3><div class="table-responsive"><table class="table table-sm align-middle small mb-0"><thead><tr><th scope="col">Task ID</th><th scope="col" data-i18n="failureSignature">Failure signature</th><th scope="col" data-i18n="finalAttempt">Final attempt</th><th scope="col" data-i18n="evidenceStatus">Evidence status</th><th scope="col" data-i18n="details">Details</th></tr></thead><tbody id="tasks-body"></tbody></table></div><p id="tasks-empty" class="text-secondary small my-3" data-i18n="waitingTasks">Waiting for task results.</p></div></section>
+          <section id="task-detail" class="card mb-4" aria-labelledby="task-heading" hidden><div class="card-body p-3 p-md-4"><div class="d-flex justify-content-between align-items-center gap-3 mb-3"><h3 id="task-heading" class="h6 mb-0" data-i18n="taskDetails">Task details</h3><button id="close-detail" class="btn btn-link btn-sm p-0 text-decoration-none" type="button" data-i18n="close">Close</button></div><div id="task-detail-content"></div><p id="task-detail-error" class="text-danger small mt-3" role="alert" hidden></p></div></section>
+          <section class="card mb-4" aria-labelledby="archive-heading"><div class="card-body p-3 p-md-4"><h3 id="archive-heading" class="h6" data-i18n="logArchive">Log archive</h3><p id="archive-summary" class="text-secondary small"></p><div id="archive-parts"></div></div></section>
+        </section>
+      </section>
+      <section id="ask-view" aria-labelledby="ask-heading" hidden>
+        <h1 id="ask-heading" class="h3 mb-2" data-i18n="generalAsk">Ask Holmes</h1><p class="text-secondary mb-4" data-i18n="askIntro">Investigate a question using the configured model and tools.</p>
+        <div id="ask-notice" class="alert alert-light border small" hidden></div>
+        <section class="card mb-4"><div class="card-body p-3 p-md-4"><form id="ask-form"><label class="form-label small" for="question" data-i18n="yourQuestion">Your question</label><textarea id="question" class="form-control" rows="5" maxlength="16000" required disabled placeholder="Describe the problem and any known clues" data-i18n-placeholder="questionPlaceholder"></textarea><p id="ask-error" class="text-danger small mt-3" role="alert" hidden></p><div class="d-flex flex-wrap align-items-center gap-3 mt-4"><button id="ask-submit" class="btn btn-primary" type="submit" disabled data-i18n="askSubmit">Submit question</button><span id="ask-progress" class="text-secondary small" aria-live="polite"></span></div></form></div></section>
+        <section id="ask-result" class="card" aria-labelledby="answer-heading" hidden><div class="card-body p-3 p-md-4"><h2 id="answer-heading" class="h5" data-i18n="answer">Answer</h2><div id="answer" class="answer"></div><details id="trace-details" class="mt-4 small"><summary data-i18n="investigationTrace">Investigation trace</summary><pre id="trace" class="log-excerpt bg-light border rounded p-3 mt-2"></pre></details></div></section>
+      </section>
+      <footer id="footer" class="border-top text-secondary small pt-3 mt-5">Holmes · 0.1.0</footer>
+    </div>
+  </main>
+</body>
+</html>

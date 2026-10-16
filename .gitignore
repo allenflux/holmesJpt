@@ -38,3 +38,7 @@ target/
 *.iml
 *.log
 !examples/evidence/*.log
+data/holmes-log/
+data/holmes-log-demo/
+data/holmes-log-auto-preview/
+deploy/tasks/

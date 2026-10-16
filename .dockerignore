@@ -1,0 +1,10 @@
+# 白名单构建上下文：不传入 .env、源码、任务快照、日志或本地数据目录。
+**
+!Dockerfile
+!.dockerignore
+!target/
+!target/holmes-java-0.1.0.jar
+!config/
+!config/tools-web.json
+!runbooks/
+!runbooks/*.md
