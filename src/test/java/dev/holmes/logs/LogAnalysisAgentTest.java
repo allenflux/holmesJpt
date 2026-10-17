@@ -327,6 +327,75 @@ class LogAnalysisAgentTest {
         for (int i = 0; i < client.messages.size(); i++) assertTrue(byteSize(client.messages.get(i)) + byteSize(client.tools.get(i)) <= 48 * 1024);
     }
 
+    @Test void samplesPrioritizeServerFrequencyAndDiverseGroupsBeforeEarlierDuplicateErrors() throws Exception {
+        ObjectNode payload = (ObjectNode) payload(input());
+        ((ObjectNode) payload.path("evidence").get(0)).put("event_time", "2026-10-17T03:00:00Z");
+        for (int index = 0; index < 9; index++) payload.withArray("evidence").addObject().put("evidence_id", "old-" + index)
+                .put("task_ref", "ref-b").put("event", "execution_error").put("event_time", "2026-10-17T01:00:00Z")
+                .put("failure_signature", "HTTP_404").put("error_summary", "人工旧样本。");
+        ArrayNode groups = payload.putArray("error_groups");
+        groups.add(group("low", "", 1, 10, "ev-b")); groups.add(group("high", "ImageLoader", 24, 30, "ev-a"));
+        Capturing client = new Capturing((round, messages, tools) -> round == 1 ? calls(call("c1", "get_error_samples", "{}")) : answer("ev-a"));
+
+        new LogAnalysisAgent(client).run(messages(payload));
+
+        JsonNode read = toolResults(client.messages.get(1)).get(0).path("evidence");
+        assertEquals(8, read.size()); assertEquals("ev-a", read.get(0).path("evidence_id").asText()); assertEquals("ev-b", read.get(1).path("evidence_id").asText());
+        assertEquals(24, payload(client.messages.get(0)).path("error_groups").get(1).path("task_count").asInt());
+        assertTrue(client.messages.get(0).get(0).path("content").asText().contains("具体排查步骤"));
+    }
+
+    @Test void invalidGroupMetadataIsRejectedBeforeAnyModelRequest() throws Exception {
+        List<ObjectNode> invalidGroups = new ArrayList<>();
+        invalidGroups.add(group("high", "ImageLoader", -1, 30, "ev-a"));
+        invalidGroups.add(group("high", "ImageLoader", 51, 60, "ev-a"));
+        invalidGroups.add(group("high", "ImageLoader", 24, 2, "ev-a"));
+        invalidGroups.add(group("high", "ImageLoader", 24, 30, "foreign-evidence"));
+        invalidGroups.add(group("high", "OtherNode", 24, 30, "ev-a"));
+        invalidGroups.add(group("high", "ImageLoader", 24, 30, "ev-a").put("signature", "HTTP_500"));
+        invalidGroups.add(group("high", "ImageLoader", 24, 30, "ev-a").put("task_count", 2.5));
+        invalidGroups.add(group("high", "ImageLoader", 24, 30, "ev-a").put("task_id", "private-task"));
+        ObjectNode repeated = group("high", "ImageLoader", 24, 30, "ev-a"); repeated.withArray("representative_evidence_ids").add("ev-a"); invalidGroups.add(repeated);
+        for (ObjectNode group : invalidGroups) {
+            ObjectNode payload = (ObjectNode) payload(input()); payload.putArray("error_groups").add(group);
+            Capturing client = new Capturing((round, messages, tools) -> answer("ev-a"));
+            assertSafe(assertThrows(IOException.class, () -> new LogAnalysisAgent(client).run(messages(payload)))); assertTrue(client.messages.isEmpty());
+        }
+        ObjectNode duplicate = (ObjectNode) payload(input());
+        duplicate.putArray("error_groups").add(group("same", "ImageLoader", 24, 30, "ev-a")).add(group("same", "", 8, 10, "ev-b"));
+        Capturing client = new Capturing((round, messages, tools) -> answer("ev-a"));
+        assertSafe(assertThrows(IOException.class, () -> new LogAnalysisAgent(client).run(messages(duplicate)))); assertTrue(client.messages.isEmpty());
+    }
+
+    @Test void eightSamplesCoverSixHighestGroupsAndSecondTasksForTwoMostFrequentGroups() throws Exception {
+        ObjectNode payload = (ObjectNode) payload(input()); ArrayNode evidence = payload.putArray("evidence"), groups = payload.putArray("error_groups");
+        for (int index = 0; index < 9; index++) {
+            String id = "group-ev-" + index;
+            evidence.addObject().put("evidence_id", id).put("task_ref", "ref-a").put("event", "execution_error")
+                    .put("failure_signature", "HTTP_404").put("node_type", "ImageLoader").put("error_summary", "人工组" + index);
+            ObjectNode group = group("group-" + index, "ImageLoader", index == 0 ? 24 : index == 1 ? 8 : 1, index < 2 ? 30 : 1, id);
+            if (index < 2) {
+                String second = "group-second-" + index; group.withArray("representative_evidence_ids").add(second);
+                evidence.addObject().put("evidence_id", second).put("task_ref", "ref-b").put("event", "execution_error")
+                        .put("failure_signature", "HTTP_404").put("node_type", "ImageLoader").put("error_summary", "人工组" + index);
+            }
+            groups.add(group);
+        }
+        Capturing client = new Capturing((round, messages, tools) -> round == 1 ? calls(call("c1", "get_error_samples", "{}")) : answer("group-ev-0"));
+
+        new LogAnalysisAgent(client).run(messages(payload));
+
+        List<String> actual = new ArrayList<>();
+        for (JsonNode item : toolResults(client.messages.get(1)).get(0).path("evidence")) actual.add(item.path("evidence_id").asText());
+        assertEquals(List.of("group-ev-0", "group-ev-1", "group-ev-2", "group-ev-3", "group-ev-4", "group-ev-5", "group-second-0", "group-second-1"), actual);
+    }
+
+    private static ObjectNode group(String id, String node, int tasks, int evidence, String representative) {
+        ObjectNode group = Json.MAPPER.createObjectNode().put("group_id", id).put("title", "人工候选错误").put("signature", "HTTP_404")
+                .put("node_type", node).put("task_count", tasks).put("evidence_count", evidence);
+        group.putArray("representative_evidence_ids").add(representative); return group;
+    }
+
     private static ArrayNode input() {
         ObjectNode payload = Json.MAPPER.createObjectNode().put("input_truncated", false);
         ArrayNode tasks = payload.putArray("tasks");

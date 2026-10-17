@@ -100,7 +100,7 @@ public final class WebCli {
                 可选 HOLMES_WEB_PASSWORD（至少 12 个字符）启用密码访问。
                 日志配置沿用 HOLMES_LOG_* / HOLMES_GRAFANA_* / HOLMES_FLUXDROP_*。
                 默认自动读取 HOLMES_SCHEDULER_URL 任务接口；--tasks 文件 可改用任务快照。
-                配置 LLM_API_KEY 后启用通用问答与可选日志解释；日志解释需在页面显式请求。
+                配置 LLM_API_KEY 后，一键发现高频错误会自动取证并调用模型；历史批次可按需生成解释。
                 --demo 使用明确标注的固定合成样本和本机解释，不调用外部模型。
                 远端 Docker Compose 与 HTTPS 反向代理步骤见 docs/网页服务与部署.md。
                 """);

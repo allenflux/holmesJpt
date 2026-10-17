@@ -103,6 +103,26 @@ class LogNarrativeGeneratorTest {
         assertTrue(result.path("limitations").toString().contains("输入已按预算裁剪"));
     }
 
+    @Test void schedulerRecordAndObservedTaskAliasesNeverLeaveInModelTextOrOutput() throws Exception {
+        ObjectNode report = report();
+        var task = (ObjectNode) report.path("tasks").get(0);
+        task.putObject("scheduler_facts").put("record_id", "private-source-record-id");
+        task.putObject("log_lookup").put("scheduler_task_id", "private-lookup-task-id");
+        var evidence = (ObjectNode) report.path("evidence").get(0);
+        evidence.put("observed_task_id", "private-observed-task-id");
+        String raw = "private-source-record-id private-lookup-task-id private-observed-task-id";
+        evidence.put("error_summary", raw);
+        Capturing client = new Capturing(messages -> {
+            ObjectNode body = answerBody(messages); body.put("summary", raw);
+            return reply(body.toString(), "stop");
+        });
+        var result = generator(client).generate(report);
+        for (String id : raw.split(" ")) {
+            assertFalse(client.messages.toString().contains(id), id);
+            assertFalse(result.toString().contains(id), id);
+        }
+    }
+
     @Test void referencesMustBelongToEvidenceActuallySentNotMerelyToOriginalReport() throws Exception {
         ObjectNode report = report();
         ((ArrayNode) report.path("tasks").get(0).path("evidence_ids")).add("ev_unlinked");
@@ -290,6 +310,49 @@ class LogNarrativeGeneratorTest {
 
         assertEquals(2, calls[0]); assertEquals(2, result.path("analysis").path("model_rounds").asInt());
         assertEquals(1, result.path("analysis").path("tool_calls").asInt()); assertEquals(50, report.path("tasks").size()); assertEquals(78, report.path("evidence").size());
+    }
+
+    @Test void denseBatchKeepsAllTaskSummariesAndFullBatchFrequencyWithRepresentativeCoverage() throws Exception {
+        ObjectNode report = Json.MAPPER.createObjectNode().put("retrieved_event_count", 1_904);
+        ArrayNode tasks = report.putArray("tasks"), evidence = report.putArray("evidence");
+        for (int index = 0; index < 50; index++) {
+            ObjectNode task = tasks.addObject().put("task_ref", "ref-" + index).put("task_id", "private-task-" + index)
+                    .put("association_scope", "TASK_ONLY").put("signature", "INCOMPLETE").put("collection_status", "COLLECTED");
+            task.putArray("evidence_ids"); task.putArray("quality_flags").add("TASK_ATTEMPT_UNVERIFIED");
+        }
+        // 高频组排在来源数组尾部，验证不会按来源顺序被低频或普通上下文挤掉。
+        for (int index = 49; index >= 0; index--) {
+            String id = "error-" + index, node = index < 24 ? "FaceFusionNode" : index < 32 ? "SulphurAPIVisionPromptEnhancer" : "OtherNode" + index;
+            ((ObjectNode) tasks.get(index)).withArray("evidence_ids").add(id);
+            evidence.addObject().put("evidence_id", id).put("task_ref", "ref-" + index).put("event", "execution_error")
+                    .put("event_time", "2026-10-17T01:00:00Z").put("failure_signature", "HTTP_400").put("node_type", node)
+                    .put("error_summary", node + " 人工错误详情。".repeat(40)).put("historical_attempt", false).put("excerpt", "raw-private-never-send");
+        }
+        for (int index = 0; index < 313; index++) {
+            String id = "context-" + index;
+            ((ObjectNode) tasks.get(index % 50)).withArray("evidence_ids").add(id);
+            evidence.addObject().put("evidence_id", id).put("task_ref", "ref-" + index % 50).put("event", "task_progress")
+                    .put("exception_message", "普通人工上下文。".repeat(100));
+        }
+        ObjectNode before = report.deepCopy(); Capturing client = new Capturing(LogNarrativeGeneratorTest::valid);
+
+        ObjectNode output = generator(client).generate(report);
+
+        JsonNode input = input(client.messages); assertEquals(50, input.path("tasks").size());
+        assertEquals(20, input.path("error_groups").size()); assertEquals(24, input.path("error_groups").get(0).path("task_count").asInt());
+        assertEquals(8, input.path("error_groups").get(1).path("task_count").asInt());
+        assertEquals("FaceFusionNode", input.path("evidence").get(0).path("node_type").asText());
+        java.util.Set<String> included = new java.util.HashSet<>();
+        for (JsonNode item : input.path("evidence")) included.add(item.path("evidence_id").asText());
+        for (JsonNode group : input.path("error_groups")) {
+            assertFalse(group.path("representative_evidence_ids").isEmpty());
+            for (JsonNode id : group.path("representative_evidence_ids")) assertTrue(included.contains(id.asText()));
+            assertEquals(java.util.Set.of("group_id", "title", "signature", "node_type", "task_count", "evidence_count", "representative_evidence_ids"),
+                    new java.util.HashSet<>(java.util.stream.StreamSupport.stream(java.util.Spliterators.spliteratorUnknownSize(group.fieldNames(), 0), false).toList()));
+        }
+        assertTrue(output.path("input_truncated").asBoolean()); assertTrue(Json.MAPPER.writeValueAsBytes(client.messages).length <= 48 * 1024);
+        assertFalse(client.messages.toString().contains("raw-private-never-send")); assertFalse(client.messages.toString().contains("private-task-"));
+        assertEquals(before, report);
     }
 
     private static LogNarrativeGenerator generator(LlmClient client) { return new LogNarrativeGenerator(client, "synthetic-model", "https://model.example.test/v1"); }

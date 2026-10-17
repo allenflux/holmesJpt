@@ -728,10 +728,16 @@ class LogAnalyzerTest {
                 event(7, "{\"task_id\":\"task-a\",\"exception_message\":\"HTTP 500\"}", "pod", "3")), "prod", true, List.of());
 
         assertEquals(3, report.path("evidence").size());
-        assertEquals("SOURCE_RECORD_TASK_ID_ATTEMPT_UNVERIFIED", report.path("evidence").get(0).path("association_basis").asText());
-        assertEquals("SOURCE_RECORD_TASK_ID_ATTEMPT_UNVERIFIED", report.path("evidence").get(1).path("association_basis").asText());
-        assertEquals("scheduler-task-a", report.path("evidence").get(1).path("observed_prompt_id").asText());
-        assertEquals("TASK_ID_ONLY_ATTEMPT_UNVERIFIED", report.path("evidence").get(2).path("association_basis").asText());
+        // 代表证据按错误优先排序；用精确事件时间定位，不能把排序后的索引当作输入顺序。
+        JsonNode labelled = find(report.path("evidence"), "event_time", START.plusSeconds(5).toString());
+        JsonNode prompted = find(report.path("evidence"), "event_time", START.plusSeconds(6).toString());
+        JsonNode original = find(report.path("evidence"), "event_time", START.plusSeconds(7).toString());
+        assertEquals("SOURCE_RECORD_TASK_ID_ATTEMPT_UNVERIFIED", labelled.path("association_basis").asText());
+        assertEquals("scheduler-task-a", labelled.path("observed_task_id").asText());
+        assertEquals("SOURCE_RECORD_TASK_ID_ATTEMPT_UNVERIFIED", prompted.path("association_basis").asText());
+        assertEquals("scheduler-task-a", prompted.path("observed_prompt_id").asText());
+        assertEquals("TASK_ID_ONLY_ATTEMPT_UNVERIFIED", original.path("association_basis").asText());
+        assertEquals("task-a", original.path("observed_task_id").asText());
         assertEquals("INCOMPLETE", resultTask(report, "task-a").path("signature").asText());
     }
 

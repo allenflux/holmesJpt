@@ -40,6 +40,8 @@ public final class LogNarrativeGenerator {
             面向接手排障的工程师写简短说明：摘要先说明观察到的错误、涉及组件和排查方向，控制在约120个汉字。
             只保留最多6项有意义发现，每项解释约180个汉字；建议与限制各最多3项，不逐条铺开所有内部质量标志或普通进度事件。
             建议必须是工程师可执行的核查动作；可以建议组件维护角色，不得指定真实人员、声称已经派工或已经解决。
+            error_groups 是服务端从完整批次计算的样本错误分组，task_count 是受影响任务数、evidence_count 是事件数；两者不可混用，不得从裁剪样本重算或称为全平台频率。
+            优先解释 task_count 较高的错误组；每项 finding 只对应一个 error_groups 组，不合并不同组的证据；explanation 要写明具体异常、对应节点，以及该类错误的可执行核查动作，并引用该组实际读取的代表证据。
             你只能解释输入中的既有规则结果，不得修改、重新计算或补造任务归属、执行映射、规则签名、簇数量或统计。
             association_scope=TASK_ONLY 时，日志仅按任务身份关联，所有错误均为候选现象；不得认定最终执行、重试归属或最终根因。
             EXECUTION_ERROR 只证明观察到失败事件，异常细节未知。没有证据支持的内容必须列为限制，不得猜测。
@@ -131,34 +133,43 @@ public final class LogNarrativeGenerator {
     private Input buildInput(JsonNode report) throws IOException {
         Privacy privacy = new Privacy(report);
         ObjectNode payload = Json.MAPPER.createObjectNode();
-        ArrayNode sentTasks = payload.putArray("tasks"), sentEvidence = payload.putArray("evidence");
+        ArrayNode sentTasks = payload.putArray("tasks"), sentEvidence = payload.putArray("evidence"), sentGroups = payload.putArray("error_groups");
         payload.putArray("quality_flags"); payload.putArray("limitations"); payload.put("input_truncated", false);
         Map<String, JsonNode> tasks = associatedTasks(report);
         Set<String> includedTasks = new HashSet<>(), includedEvidence = new LinkedHashSet<>();
-        List<JsonNode> candidates = new ArrayList<>();
-        for (JsonNode evidence : report.path("evidence")) if (usable(evidence, tasks)) candidates.add(evidence);
-        // 先保留有错误摘要或错误签名的证据，同时保留其任务边界；普通事件不能挤占错误证据预算。
-        candidates.sort(Comparator.comparingInt(LogNarrativeGenerator::priority).reversed());
+        Map<String, JsonNode> available = new LinkedHashMap<>();
+        for (JsonNode evidence : report.path("evidence")) if (usable(evidence, tasks)) available.putIfAbsent(evidence.path("evidence_id").asText(), evidence);
+        // 先保留固定任务概览，再按服务端分组留代表证据，防止早期重复错误挤掉高频组或待补证任务。
+        for (Map.Entry<String, JsonNode> task : tasks.entrySet()) {
+            if (sentTasks.size() >= 50) { privacy.truncated = true; continue; }
+            sentTasks.add(projectTask(task.getValue(), privacy));
+            if (!fits(payload)) { sentTasks.remove(sentTasks.size() - 1); privacy.truncated = true; }
+            else includedTasks.add(task.getKey());
+        }
+        ObjectNode engineerView = LogErrorGroups.build(report);
+        if (engineerView.path("truncated").asBoolean()) privacy.truncated = true;
+        for (JsonNode group : engineerView.path("groups")) {
+            ObjectNode projected = projectGroup(group, available, includedTasks, privacy);
+            if (projected.path("representative_evidence_ids").isEmpty()) continue;
+            sentGroups.add(projected);
+            if (!fits(payload)) { sentGroups.remove(sentGroups.size() - 1); privacy.truncated = true; }
+        }
+        List<JsonNode> candidates = representativeFirst(sentGroups, available);
         for (JsonNode evidence : candidates) {
             String id = evidence.path("evidence_id").asText(), ref = evidence.path("task_ref").asText();
             if (includedEvidence.contains(id)) continue;
             if (includedEvidence.size() >= 128 || privacy.identities.containsKey(id)) { privacy.truncated = true; continue; }
-            if (!includedTasks.contains(ref) && sentTasks.size() >= 50) { privacy.truncated = true; continue; }
-            boolean addedTask = includedTasks.add(ref);
-            if (addedTask) sentTasks.add(projectTask(tasks.get(ref), privacy));
+            if (!includedTasks.contains(ref)) { privacy.truncated = true; continue; }
             sentEvidence.add(projectEvidence(evidence, privacy));
             if (!fits(payload)) {
                 sentEvidence.remove(sentEvidence.size() - 1);
-                if (addedTask) { sentTasks.remove(sentTasks.size() - 1); includedTasks.remove(ref); }
                 privacy.truncated = true;
             } else includedEvidence.add(id);
         }
         if (includedEvidence.isEmpty()) throw new LogNarrativeFailure("NARRATIVE_INPUT_BUDGET");
-        for (Map.Entry<String, JsonNode> task : tasks.entrySet()) {
-            if (includedTasks.contains(task.getKey())) continue;
-            if (sentTasks.size() >= 50) { privacy.truncated = true; continue; }
-            sentTasks.add(projectTask(task.getValue(), privacy));
-            if (!fits(payload)) { sentTasks.remove(sentTasks.size() - 1); privacy.truncated = true; }
+        for (JsonNode group : sentGroups) {
+            ArrayNode ids = (ArrayNode) group.path("representative_evidence_ids");
+            for (int index = ids.size() - 1; index >= 0; index--) if (!includedEvidence.contains(ids.get(index).asText())) ids.remove(index);
         }
         appendInputFlags(payload, "quality_flags", report.path("quality_flags"), privacy);
         appendInputFlags(payload, "limitations", report.path("limitations"), privacy);
@@ -166,6 +177,30 @@ public final class LogNarrativeGenerator {
         ArrayNode messages = messages(payload);
         if (Json.MAPPER.writeValueAsBytes(messages).length > INPUT_BYTES) throw new LogNarrativeFailure("NARRATIVE_INPUT_BUDGET");
         return new Input(messages, includedEvidence, privacy, privacy.truncated);
+    }
+
+    private static ObjectNode projectGroup(JsonNode source, Map<String, JsonNode> available, Set<String> tasks, Privacy privacy) {
+        ObjectNode result = Json.MAPPER.createObjectNode();
+        for (String key : List.of("group_id", "title", "signature", "node_type")) putText(result, key, source, privacy, 256);
+        for (String key : List.of("task_count", "evidence_count")) result.put(key, Math.max(0, source.path(key).asLong()));
+        ArrayNode ids = result.putArray("representative_evidence_ids");
+        for (JsonNode id : source.path("representative_evidence_ids")) {
+            JsonNode evidence = available.get(id.asText());
+            if (evidence != null && tasks.contains(evidence.path("task_ref").asText()) && !privacy.identities.containsKey(id.asText())) ids.add(id.asText());
+        }
+        return result;
+    }
+
+    private static List<JsonNode> representativeFirst(ArrayNode groups, Map<String, JsonNode> available) {
+        Map<String, JsonNode> ordered = new LinkedHashMap<>();
+        // 第一轮让每类错误至少有一个样本，第二轮补充不同任务的同类代表，再填其余错误与上下文。
+        for (int index = 0; index < 2; index++) for (JsonNode group : groups) {
+            JsonNode id = group.path("representative_evidence_ids").path(index);
+            if (id.isTextual() && available.containsKey(id.asText())) ordered.putIfAbsent(id.asText(), available.get(id.asText()));
+        }
+        available.values().stream().sorted(Comparator.comparingInt(LogNarrativeGenerator::priority).reversed())
+                .forEach(evidence -> ordered.putIfAbsent(evidence.path("evidence_id").asText(), evidence));
+        return new ArrayList<>(ordered.values());
     }
 
     private static int priority(JsonNode evidence) {
@@ -179,8 +214,9 @@ public final class LogNarrativeGenerator {
         if (source.path("collection_event_count").isIntegralNumber()) result.put("collection_event_count", Math.max(0, source.path("collection_event_count").asLong()));
         for (String key : List.of("observed_signatures", "quality_flags", "collection_limitations")) {
             ArrayNode values = result.putArray(key); int seen = 0;
+            int maximum = key.equals("observed_signatures") ? 4 : key.equals("quality_flags") ? 2 : 1;
             for (JsonNode value : source.path(key)) {
-                if (++seen > 24) { privacy.truncated = true; break; }
+                if (++seen > maximum) { privacy.truncated = true; break; }
                 if (value.isTextual()) values.add(privacy.text(value.asText(), 256));
             }
         }

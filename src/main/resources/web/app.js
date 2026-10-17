@@ -86,6 +86,8 @@ const TEXT = {
   exportFacts: ['Observed error facts', '已观察错误事实'], exportTasks: ['Related task IDs', '涉及任务 ID'], exportSource: ['Source batch and evidence', '来源批次与证据'],
   exportScope: ['This brief contains redacted structured evidence only; it does not assign an engineer or confirm final-execution ownership.', '处理单仅包含已脱敏的结构化证据；不代表已分配工程师或已确认最终执行归属。'],
   qualityDetails: ['Execution ownership and quality details', '执行归属与质量详情'],
+  groupModelAnalysis: ['Model analysis', '模型分析'], groupModelEvidence: ['Evidence cited by the model', '模型引用的证据'],
+  modelInterpretationScope: ['Model interpretation of the cited observations; verify the suggested causes before applying a fix.', '模型基于所引证据解释现象；建议的原因仍需工程师验证。'],
   clusterHint: ['Percentages use all selected failed tasks. A failure signature describes an observation, not a proven shared root cause.', '占比分母为本批次全部选中失败任务。失败签名描述已观察现象，不能直接当作共同根因。'],
   failedTasks: ['Failed tasks', '失败任务'], failureSignature: ['Failure signature', '失败签名'], finalAttempt: ['Final attempt', '最终执行'],
   evidenceStatus: ['Evidence status', '取证状态'], details: ['Details', '详情'], waitingTasks: ['Waiting for task results.', '正在等待任务处理结果。'],
@@ -119,12 +121,13 @@ const TEXT = {
   notProvided: ['Not provided', '未提供'], unknownPod: ['Unknown Pod', '未知 Pod'], unknownContainer: ['Unknown container', '未知容器'],
   taskLookupDetails: ['Task source and log lookup', '任务来源与日志查询'],
   schedulerTaskType: ['Task type: {type}', '任务类型：{type}'],
-  schedulerErrorCode: ['Scheduler error code (source state, not a root cause): {code}', '调度器错误码（源状态，非根因）：{code}'],
-  schedulerRecordTimes: ['Scheduler record (UTC): created {created}; updated {updated}', '调度器记录（UTC）：创建 {created}；更新 {updated}'],
+  schedulerErrorCode: ['Platform error code (source state, not a root cause): {code}', '平台错误码（源状态，非根因）：{code}'],
+  schedulerRecordTimes: ['Platform task record (UTC): created {created}; updated {updated}', '平台任务记录（UTC）：创建 {created}；更新 {updated}'],
   lookupSummary: ['Log lookup: {strategy} · {status} · {count} log-source queries', '日志查询：{strategy} · {status} · {count} 次日志查询'],
-  lookupAutomatic: ['Automatic scheduler lifecycle window', '按调度器生命周期自动选窗'],
+  lookupAutomatic: ['Automatic source-task lifecycle window', '按任务来源记录自动选窗'],
   lookupBatch: ['Batch window', '批次时间窗'], lookupVerified: ['Verified attempt window', '已验证执行时间窗'],
   lookupStreamContext: ['Verified attempt stream context', '已验证执行的日志流上下文'],
+  lookupFallback: ['Automatic 72-hour ID lookup', '自动回查最多72小时'],
   lookupMatched: ['Logs matched', '命中日志'], lookupNoMatch: ['No log match', '未匹配日志'],
   lookupFailed: ['Query failed', '查询失败'], lookupIncomplete: ['Query incomplete', '查询不完整'],
   lookupMapping: ['ID association: {mapping}', 'ID 关联方式：{mapping}'],
@@ -797,6 +800,49 @@ function groupEvidence(group,report) {
   return [...new Set(list(group.representative_evidence_ids).filter(value=>typeof value==='string'))].slice(0,2)
     .map(id=>narrativeEvidence(id,report)).filter(linked=>linked&&refs.has(linked.task.task_ref));
 }
+function groupNarrativeFindings(group,report) {
+  if(report?.narrative_status!=='AVAILABLE'||!report.narrative||typeof report.narrative!=='object')return [];
+  const refs=new Set(list(group.task_refs)),representatives=new Set(list(group.representative_evidence_ids)),text=value=>typeof value==='string'?value.trim():'';
+  const signature=evidence=>text(evidence.failure_signature)||(['execution_error','execution_failed','execution_failure','task_failed','task_failure'].includes(text(evidence.event).toLowerCase())?'EXECUTION_ERROR':'');
+  // 服务端分组包含异常消息，不能仅凭同一任务、签名或节点给模型发现贴组。
+  // 代表证据之外仅接纳与锚点结构化消息完全相同的证据；宁可留在全局，也不模糊归类。
+  const identity=evidence=>{
+    const node=text(evidence.node_type),component=text(evidence.component)||text(evidence.container)||'unknown',message=text(evidence.error_summary)||text(evidence.exception_message);
+    return message?JSON.stringify([signature(evidence),node&&node!=='unknown'?node:component,text(evidence.exception_type),message.replace(/\s+/g,' ')]):'';
+  };
+  const uniqueEvidence=id=>{
+    if(list(report.evidence).filter(item=>item?.evidence_id===id).length!==1)return null;
+    const linked=narrativeEvidence(id,report);
+    return linked&&refs.has(linked.task.task_ref)&&linked.evidence.historical_attempt!==true&&linked.evidence.context_only!==true?linked:null;
+  };
+  const anchors=[...representatives].filter(id=>typeof id==='string').map(uniqueEvidence).filter(linked=>linked&&signature(linked.evidence)===text(group.signature)
+    &&text(linked.evidence.node_type)===text(group.node_type)&&text(linked.evidence.exception_type)===text(group.exception_type));
+  if(!anchors.length)return [];
+  const anchorIds=new Set(anchors.map(linked=>linked.evidence.evidence_id)),identities=new Set(anchors.map(linked=>identity(linked.evidence)).filter(Boolean));
+  return list(report.narrative.findings).flatMap(finding=>{
+    if(!finding||typeof finding!=='object'||(!text(finding.title)&&!text(finding.explanation)))return [];
+    const supplied=list(finding.evidence_ids);
+    if(!supplied.length||supplied.some(id=>typeof id!=='string'))return [];
+    const ids=[...new Set(supplied)],evidence=ids.map(uniqueEvidence);
+    if(evidence.some(linked=>!linked||!anchorIds.has(linked.evidence.evidence_id)&&!identities.has(identity(linked.evidence))))return [];
+    return [{finding,evidence}];
+  });
+}
+function groupNarrativeContent(group,report) {
+  const findings=groupNarrativeFindings(group,report);if(!findings.length)return null;
+  const content=element('div','small mb-3');content.append(element('h5','sample-label',t('groupModelAnalysis')));
+  for(const {finding,evidence} of findings){
+    if(typeof finding.title==='string'&&finding.title.trim())content.append(element('p','fw-semibold mb-1',finding.title));
+    if(typeof finding.explanation==='string'&&finding.explanation.trim())content.append(element('p','mb-1',finding.explanation));
+    const links=element('div','d-flex flex-wrap gap-3 mb-2');
+    for(const {evidence:item} of evidence){
+      const reference=element('button','btn btn-link btn-sm p-0 technical-wrap text-start',t('narrativeReference',{id:item.evidence_id}));reference.type='button';
+      reference.addEventListener('click',()=>openNarrativeEvidence(item.evidence_id,report.batch_id));links.append(reference);
+    }
+    content.append(links);
+  }
+  content.append(element('p','text-secondary mb-0',t('modelInterpretationScope')));return content;
+}
 function structuredEvidenceSummary(evidence) {
   if(typeof evidence.error_summary==='string'&&evidence.error_summary.trim())return evidence.error_summary;
   const fields=[evidence.event,evidence.failure_signature,evidence.exception_type].filter(value=>typeof value==='string'&&value.trim());
@@ -838,6 +884,7 @@ function renderEngineerView(report,diagnosis=reportDiagnostic(report)) {
     card.append(element('p','small mb-3',`${t('ownerRole')}: ${owner} · ${group.assignment_status==='UNASSIGNED'?t('unassigned'):t('notProvided')}`));
     const checks=list(group.recommendations).filter(value=>typeof value==='string').slice(0,3);
     if(checks.length){const items=element('ul','small mb-3');for(const check of checks)items.append(element('li','',check));card.append(element('h5','sample-label',t('recommendations')),items);}
+    const model=groupNarrativeContent(group,report);if(model)card.append(model);
     const representatives=groupEvidence(group,report);
     for(const [index,linked]of representatives.entries()){
       const evidence=linked.evidence,block=element('div','sample-log');
@@ -883,9 +930,39 @@ function engineerSampleText(group,report) {
     `${t('failureSignature')}: ${value(group.signature)}`,`${t('componentLabel')}: ${value(group.component)}`,`${t('nodeLabel')}: ${value(group.node_type)}`,
     `${t('errorSummary')}: ${value(group.normalized_message)}`,`${t('affectedTasks',{count:displayCount(group.task_count)})}`,
     `${t('ownerRole')}: ${value(group.suggested_owner_role)} · ${group.assignment_status==='UNASSIGNED'?t('unassigned'):t('notProvided')}`,'',t('exportTasks')];
-  for(const task of groupTasks(group,report))lines.push(value(task.task_id));
+  for(const task of groupTasks(group,report)){
+    const logical=value(task.task_id),scheduler=value(task.log_lookup?.scheduler_task_id)||value(task.scheduler_facts?.record_id);
+    lines.push(logical);
+    if(scheduler&&scheduler!==logical)lines.push(t('lookupTaskIdMapping',{logical,scheduler}));
+    for(const window of list(task.log_lookup?.windows).slice(0,2))if(typeof window?.from==='string'&&typeof window?.to==='string')
+      lines.push(`log_from: ${window.from} · log_to: ${window.to} · events: ${Number.isSafeInteger(window.returned_count)?window.returned_count:'—'}`);
+  }
   lines.push('',t('representativeLog'));
-  for(const {evidence} of groupEvidence(group,report))lines.push(`${value(evidence.event_time)} · Pod ${value(evidence.pod)} · ${value(evidence.evidence_id)}`,structuredEvidenceSummary(evidence),'');
+  for(const {evidence} of groupEvidence(group,report)){
+    lines.push(`${value(evidence.event_time)} · Pod ${value(evidence.pod)} · ${value(evidence.evidence_id)}`,structuredEvidenceSummary(evidence));
+    if(value(evidence.observed_task_id))lines.push(`${t('observedTaskId')}: ${value(evidence.observed_task_id)}`);
+    if(value(evidence.observed_prompt_id))lines.push(`${t('observedPromptId')}: ${value(evidence.observed_prompt_id)}`);
+    if(value(evidence.content_sha256))lines.push(`SHA-256: ${value(evidence.content_sha256)}`);
+    lines.push('');
+  }
+  const findings=groupNarrativeFindings(group,report);
+  if(findings.length){
+    lines.push(t('groupModelAnalysis'),t('modelInterpretationScope'));
+    const cited=new Map();
+    for(const {finding,evidence} of findings){
+      lines.push(value(finding.title),value(finding.explanation));
+      for(const linked of evidence){lines.push(`evidence_id: ${value(linked.evidence.evidence_id)}`);cited.set(linked.evidence.evidence_id,linked);}
+      lines.push('');
+    }
+    lines.push(t('groupModelEvidence'));
+    for(const {evidence,task} of cited.values()){
+      lines.push(`evidence_id: ${value(evidence.evidence_id)}`,`Task ID: ${value(task.task_id)}`,`${value(evidence.event_time)} · Pod ${value(evidence.pod)}`,
+        `${t('nodeLabel')}: ${value(evidence.node_type)}`,`${t('failureSignature')}: ${value(evidence.failure_signature)}`,structuredEvidenceSummary(evidence));
+      for(const name of ['exception_type','exception_message','observed_task_id','observed_prompt_id'])if(value(evidence[name]))lines.push(`${name}: ${value(evidence[name])}`);
+      if(value(evidence.content_sha256))lines.push(`SHA-256: ${value(evidence.content_sha256)}`);
+      lines.push('');
+    }
+  }
   lines.push(t('qualityDetails'),value(group.quality_hint),'',t('recommendations'),...list(group.recommendations).filter(text=>typeof text==='string').slice(0,3).map(text=>`- ${text}`),'',
     t('exportSource'),`source: ${value(report.source)||t('notProvided')}`,`namespace: ${value(report.namespace)||t('notProvided')}`,
     `from: ${value(report.request?.selection?.from)||t('notProvided')}`,`to: ${value(report.request?.selection?.to)||t('notProvided')}`,
@@ -1095,7 +1172,7 @@ function taskLookupContent(task) {
     lines.push(t('schedulerRecordTimes',{created:iso(facts.created_at),updated:iso(facts.updated_at)}));
   if(lookup){
     const strategies={AUTOMATIC_TASK_LIFECYCLE:'lookupAutomatic',BATCH_WINDOW:'lookupBatch',VERIFIED_ATTEMPT_WINDOW:'lookupVerified'},
-      bases={...strategies,VERIFIED_STREAM_CONTEXT:'lookupStreamContext'},
+      bases={...strategies,VERIFIED_STREAM_CONTEXT:'lookupStreamContext',AUTOMATIC_ID_FALLBACK:'lookupFallback'},
       statuses={MATCHED:'lookupMatched',NO_MATCH:'lookupNoMatch',QUERY_FAILED:'lookupFailed',INCOMPLETE:'lookupIncomplete'},
       mappings={TASK_ONLY:'lookupTaskIdOnly',TASK_ID_ONLY:'lookupTaskIdOnly',SOURCE_RECORD_TASK_ID:'lookupSourceRecordMapping',VERIFIED_ATTEMPTS:'lookupVerifiedMapping'},
       key=(table,value)=>typeof value==='string'&&Object.hasOwn(table,value)?table[value]:'notProvided';

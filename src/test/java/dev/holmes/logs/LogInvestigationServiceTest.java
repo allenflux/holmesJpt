@@ -247,6 +247,75 @@ class LogInvestigationServiceTest {
         assertFalse(lookup.path("windows").get(0).path("complete").asBoolean());
     }
 
+    @Test void sourceRecordIdFindsSchedulerPromptWhilePreservingLogicalTaskAndCandidateBoundary() throws Exception {
+        var config = fixtureConfig(directory, Map.of());
+        var time = Instant.parse("2026-10-15T05:30:00Z");
+        var selected = new LogModels.Task("platform-ref", "platform-task", "failed", List.of(), "", "", null, "source-version",
+                LogModels.AssociationScope.TASK_ONLY, new LogModels.SchedulerFacts("scheduler-task", "face_video", "FAILED", time.minusSeconds(5), time));
+        AtomicReference<LogModels.LogQuery> actual = new AtomicReference<>();
+        var service = start(config, (query, maxEvents, maxBytes, deadline) -> {
+            actual.set(query);
+            return new FetchResult(query.identifiers().contains("scheduler-task") ? List.of(new LogEvent(time,
+                    "{\"prompt_id\":\"scheduler-task\",\"event\":\"execution_error\",\"exception_type\":\"RuntimeError\",\"exception_message\":\"Image detection failed\"}",
+                    Map.of("namespace", "prod"), "synthetic-alias-event")) : List.of(), true, List.of(), 200);
+        }, request -> new TaskSnapshot.Selection(List.of(selected), time.plusSeconds(10).toString(), List.of()), null);
+        var report = completed(service, service.submit(fixtureRequest().put("log_window", "automatic")));
+        var result = report.path("tasks").get(0);
+        assertEquals(List.of("platform-task", "scheduler-task"), actual.get().identifiers());
+        assertEquals("platform-task", result.path("task_id").asText());
+        assertEquals("COLLECTED", result.path("collection_status").asText());
+        assertEquals("INCOMPLETE", result.path("signature").asText());
+        assertEquals("SOURCE_RECORD_TASK_ID", result.path("log_lookup").path("mapping_status").asText());
+        assertEquals("scheduler-task", result.path("log_lookup").path("scheduler_task_id").asText());
+        assertEquals("SOURCE_RECORD_TASK_ID_ATTEMPT_UNVERIFIED", report.path("evidence").get(0).path("association_basis").asText());
+        assertTrue(report.path("evidence").get(0).path("candidate_only").asBoolean());
+        assertEquals(1, report.path("engineer_view").path("summary").path("error_task_count").asInt());
+    }
+
+    @Test void fixedListAliasConflictsAreBlockedBeforePerTaskCollection() throws Exception {
+        var config = fixtureConfig(directory, Map.of());
+        var time = Instant.parse("2026-10-15T05:30:00Z");
+        var first = new LogModels.Task("ref-a", "platform-task", "failed", List.of(), "", "", null, "source-version",
+                LogModels.AssociationScope.TASK_ONLY, new LogModels.SchedulerFacts("other-task", "type", "FAILED", time, time));
+        var other = new LogModels.Task("ref-b", "other-task", "failed", List.of(), "", "", null, "source-version", LogModels.AssociationScope.TASK_ONLY);
+        AtomicInteger calls = new AtomicInteger();
+        var service = start(config, (query, maxEvents, maxBytes, deadline) -> { calls.incrementAndGet(); return new FetchResult(List.of(), true, List.of(), 0); },
+                request -> new TaskSnapshot.Selection(List.of(first, other), time.plusSeconds(10).toString(), List.of()), null);
+        var report = completed(service, service.submit(fixtureRequest()));
+        assertEquals(0, calls.get()); assertEquals(2, report.path("processed_count").asInt());
+        for (var task : report.path("tasks")) {
+            assertEquals("SKIPPED", task.path("collection_status").asText());
+            assertTrue(task.path("collection_limitations").toString().contains("TASK_ID_ALIAS_CONFLICT"));
+            assertEquals(0, task.path("log_lookup").path("query_count").asInt());
+            assertTrue(task.path("evidence_ids").isEmpty());
+        }
+    }
+
+    @Test void automaticEmptyLifecycleFallsBackWithoutManualWindowSelection() throws Exception {
+        var config = fixtureConfig(directory, Map.of());
+        var time = Instant.parse("2026-10-15T05:30:00Z");
+        var selected = new LogModels.Task("platform-ref", "platform-task", "failed", List.of(), "", "", null, "source-version",
+                LogModels.AssociationScope.TASK_ONLY, new LogModels.SchedulerFacts("scheduler-task", "type", "FAILED", time.minusSeconds(5), time));
+        List<LogModels.LogQuery> queries = new ArrayList<>();
+        var service = start(config, (query, maxEvents, maxBytes, deadline) -> {
+            queries.add(query);
+            var event = new LogEvent(time.minusSeconds(3600), "{\"prompt_id\":\"scheduler-task\",\"event\":\"execution_error\",\"exception_message\":\"HTTP 404\"}",
+                    Map.of("namespace", "prod"), "synthetic-early-event");
+            return new FetchResult(query.from().isBefore(event.time()) ? List.of(event) : List.of(), true, List.of(), 80);
+        }, request -> new TaskSnapshot.Selection(List.of(selected), time.plusSeconds(10).toString(), List.of()), null);
+        var request = fixtureRequest().put("log_window", "automatic");
+        var report = completed(service, service.submit(request));
+        assertEquals(2, queries.size());
+        assertEquals(Duration.ofHours(72), Duration.between(queries.get(1).from(), queries.get(1).to()));
+        assertEquals(Instant.parse(request.path("selection").path("to").asText()), queries.get(1).to());
+        assertEquals(queries.get(0).identifiers(), queries.get(1).identifiers());
+        var task = report.path("tasks").get(0);
+        assertEquals("COLLECTED", task.path("collection_status").asText());
+        assertEquals(2, task.path("log_lookup").path("query_count").asInt());
+        assertEquals("AUTOMATIC_ID_FALLBACK", task.path("log_lookup").path("windows").get(1).path("basis").asText());
+        assertEquals("TASK_ONLY", task.path("association_scope").asText());
+    }
+
     @Test void incompleteSourceForOneTaskDoesNotInvalidateOtherTaskSignature() throws Exception {
         var config = fixtureConfig(directory, Map.of());
         var file = new FileLogSource(config.logsFile());

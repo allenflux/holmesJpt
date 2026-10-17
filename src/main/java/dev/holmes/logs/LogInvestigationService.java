@@ -326,6 +326,25 @@ public final class LogInvestigationService implements AutoCloseable {
                         events.addAll(result.events());
                         complete &= result.complete(); limitations.addAll(result.limitations());
                         recordUsage(job, result);
+                        // 窄窗无结果时由程序回查最多 72 小时，仍固定任务身份与授权 namespace。
+                        Instant fallbackTo = later(request.to(), window.to());
+                        Instant fallbackFrom = null;
+                        try { fallbackFrom = fallbackTo.minus(Duration.ofHours(72)); }
+                        catch (java.time.DateTimeException | ArithmeticException invalid) { /* 极端时间不执行扩大查询。 */ }
+                        if (sourceAlias && request.automaticWindow() && events.isEmpty() && result.complete() && fallbackFrom != null
+                                && (!fallbackFrom.equals(window.from()) || !fallbackTo.equals(window.to()))) {
+                            remainingEvents = config.maxEvents() - job.path("retrieved_event_count").asInt();
+                            remainingBytes = config.maxBytes() - job.path("response_bytes").asLong();
+                            if (remainingEvents > 0 && remainingBytes > 0 && Instant.now().isBefore(collectionDeadline)) {
+                                lookup.put("query_count", lookup.path("query_count").asInt() + 1);
+                                ObjectNode fallbackQuery = lookupWindows.addObject().put("from", fallbackFrom.toString()).put("to", fallbackTo.toString())
+                                        .put("basis", "AUTOMATIC_ID_FALLBACK").putNull("returned_count").put("complete", false);
+                                FetchResult fallback = logs.fetch(new LogQuery(request.namespace(), List.copyOf(identifiers), fallbackFrom, fallbackTo, Map.of()),
+                                        remainingEvents, remainingBytes, collectionDeadline);
+                                fallbackQuery.put("returned_count", fallback.events().size()).put("complete", fallback.complete());
+                                events.addAll(fallback.events()); complete &= fallback.complete(); limitations.addAll(fallback.limitations()); recordUsage(job, fallback);
+                            } else { complete = false; limitations.add("FALLBACK_BUDGET_EXHAUSTED"); }
+                        }
                         // 补取同日志流执行上下文；无 ID 的普通日志不会升级为确定归因。
                         List<Map<String, String>> streams = streams(events);
                         Attempt attempt = task.finalAttempt();
