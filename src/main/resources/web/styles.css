@@ -1,6 +1,145 @@
-:root{--bs-primary:#2c5cc5;--bs-primary-rgb:44,92,197;--bs-link-color:#2c5cc5;--bs-progress-height:.45rem}
-body{font-size:14px;background:#fff}.brand-bar{height:49px;background:#2c5cc5}.brand-mark{width:23px;height:23px}.shell-width{max-width:1120px}.page-width{max-width:960px}.login-width{max-width:410px}.count-input{max-width:120px}.progress{--bs-progress-height:.45rem}
-.btn-primary{--bs-btn-bg:#2c5cc5;--bs-btn-border-color:#2c5cc5;--bs-btn-hover-bg:#244fae;--bs-btn-hover-border-color:#244fae;--bs-btn-active-bg:#244fae;--bs-btn-disabled-bg:#2c5cc5;--bs-btn-disabled-border-color:#2c5cc5}
-.navbar .nav-link{display:flex;align-items:center;font-size:13px}.navbar .nav-link.active{box-shadow:inset 0 -2px #fff}.card{--bs-card-border-radius:8px}.progress-bar{background-color:#2c5cc5}.cluster-progress{min-width:65px}.task-id{max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.task-signature{max-width:210px;overflow-wrap:anywhere}
-.log-excerpt{font-family:var(--bs-font-monospace);font-size:11px;line-height:1.65;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}.answer{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.85}.technical-wrap{overflow-wrap:anywhere}summary{cursor:pointer}table{min-width:600px}th{font-weight:500;color:var(--bs-secondary-color)!important}button,a,input,select,textarea,summary{outline-offset:3px}
-@media(max-width:575.98px){.navbar-brand{font-size:17px!important}.navbar .nav-link{font-size:11px}.navbar .container-fluid{gap:12px!important}.navbar .navbar-nav{gap:12px!important}.navbar .form-select{font-size:11px;padding-left:7px}.navbar .btn-link{font-size:11px}}
+/* 白底、细线和少量蓝色；日常入口只突出操作、进度、错误与证据。 */
+:root {
+  --bs-primary: #315de5;
+  --bs-primary-rgb: 49, 93, 229;
+  --bs-link-color: #315de5;
+  --bs-body-color: #20252d;
+  --bs-secondary-color: #737b88;
+  --bs-border-color: #e7e9ed;
+  --bs-progress-height: .35rem;
+}
+[hidden] { display: none !important; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif; font-size: 14px; background: #fff; color: var(--bs-body-color); -webkit-font-smoothing: antialiased; }
+.shell-width { max-width: 1136px; }
+.page-width { max-width: 1040px; }
+.login-width { max-width: 400px; }
+.brand-bar { min-height: 56px; background: #fff; border-bottom: 1px solid #eceef1; }
+.navbar-brand, .navbar-brand:hover { color: #20252d; letter-spacing: -.6px; }
+.brand-mark { display: none !important; }
+.navbar .nav-link { display: flex; align-items: center; min-height: 56px; font-size: 13px; color: #737b88; }
+.navbar .nav-link:hover { color: #20252d; }
+.navbar .nav-link.active { color: #315de5; box-shadow: inset 0 -2px #315de5; }
+.navbar #logout { color: #737b88 !important; }
+.language-switch { display: inline-flex; align-items: center; gap: 14px; }
+.language-option { min-height: 32px; padding: 4px 0; border: 0; background: transparent; color: #8a919d; font-size: 12px; }
+.language-option:hover { color: #20252d; }
+.language-option[aria-pressed="true"] { color: #315de5; font-weight: 600; }
+.page-heading h1 { font-size: 28px; letter-spacing: -.6px; font-weight: 650; }
+.page-heading p { font-size: 13px; line-height: 1.8; }
+#data-badge { margin-top: 7px; padding: 0; font-size: 11px; border: 0 !important; background: transparent !important; color: #8a919d !important; }
+.card { --bs-card-border-radius: 5px; --bs-card-border-color: #e7e9ed; box-shadow: none; }
+.discovery-card { border: 0; border-bottom: 1px solid #eceef1; border-radius: 0; }
+.discovery-card > .card-body { padding: 4px 0 24px !important; }
+#analysis-form { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 6px 24px; align-items: center; }
+#analysis-form > p:first-child { grid-column: 1; margin: 0 !important; font-size: 13px; color: #4f5866; }
+.automatic-analysis-details { grid-column: 1; font-size: 11px !important; line-height: 1.8; }
+.automatic-analysis-details > summary { width: fit-content; overflow-wrap: anywhere; color: #8a919d; }
+#automatic-model-hint { max-width: 760px; color: #737b88; }
+#analysis-form > .d-flex { grid-column: 2; grid-row: 1 / 3; }
+#analysis-error { grid-column: 1 / -1; }
+#submit-hint { display: none; }
+.btn { font-size: 13px; border-radius: 5px; padding: 8px 14px; font-weight: 500; box-shadow: none !important; }
+.btn-sm { font-size: 12px; padding: 6px 10px; }
+.btn-primary { --bs-btn-bg: #315de5; --bs-btn-border-color: #315de5; --bs-btn-hover-bg: #254fd1; --bs-btn-hover-border-color: #254fd1; --bs-btn-active-bg: #2248be; --bs-btn-disabled-bg: #809beb; --bs-btn-disabled-border-color: #809beb; }
+.btn-outline-primary { --bs-btn-color: #315de5; --bs-btn-border-color: #d9e1f8; --bs-btn-hover-color: #254fd1; --bs-btn-hover-bg: #f5f7ff; --bs-btn-hover-border-color: #a6baf2; }
+.btn-outline-secondary { --bs-btn-color: #626b79; --bs-btn-border-color: #e1e5ec; --bs-btn-hover-color: #20252d; --bs-btn-hover-bg: #f6f7f9; --bs-btn-hover-border-color: #c4cbd7; }
+.btn-link:hover { text-decoration: underline !important; text-underline-offset: 3px; }
+.form-control, .form-select { border-radius: 4px; font-size: 13px; }
+.form-control:focus, .form-select:focus { border-color: #7e9bf5; box-shadow: 0 0 0 2px rgb(49 93 229 / 10%); }
+button, a, input, select, textarea, summary { outline-offset: 4px; }
+button:focus-visible, a:focus-visible, summary:focus-visible { outline: 2px solid #7e9bf5; }
+summary { cursor: pointer; }
+.restore-batch > summary { width: fit-content; font-size: 11px; color: #8a919d !important; }
+.restore-batch[open] { padding-bottom: 12px; }
+#report-section { padding-top: 6px; }
+#report-heading { font-size: 20px; font-weight: 600; }
+#batch-state { font-size: 11px; line-height: 1.5; border-radius: 4px; padding: 3px 7px; }
+#batch-id { font-size: 11px; overflow-wrap: anywhere; }
+
+/* 等待时使用不定长动画，取得名单后仅显示真实任务处理比例。 */
+.investigation-progress { padding: 16px 0 18px; border-bottom: 1px solid #eceef1; }
+.progress-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.progress-heading h3 { font-size: 13px; font-weight: 500; line-height: 1.6; }
+.progress-status { font-size: 12px; color: #737b88; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.investigation-track { height: 5px; border-radius: 3px; background: #edf0f5; overflow: hidden; }
+.progress-bar { background: #315de5; border-radius: inherit; }
+.investigation-track .progress-bar { transition: width .35s ease; }
+.progress-detail { margin: 8px 0 0; font-size: 11px; color: #8a919d; line-height: 1.7; font-variant-numeric: tabular-nums; }
+.progress-indeterminate { width: 32% !important; animation: progress-sweep 1.75s ease-in-out infinite; }
+.investigation-progress[data-tone="danger"] .progress-heading h3 { color: #b34b57; }
+.investigation-progress[data-tone="danger"] .progress-bar { background: #bc6a74; }
+.progress-bar.progress-neutral { background: #99a2b0; }
+@keyframes progress-sweep { 0% { transform: translateX(-105%); } 100% { transform: translateX(330%); } }
+
+/* 一组错误作为一个阅读单元；日志用浅灰底区分，不叠加装饰卡片。 */
+.engineer-summary { font-size: 12px; color: #737b88; line-height: 1.8; }
+#error-samples-heading { font-size: 17px; font-weight: 600; }
+.error-sample { border: 0; border-top: 1px solid #e7e9ed; padding: 22px 0; margin-bottom: 8px; background: #fff; }
+.error-sample h4 { font-size: 15px; color: #20252d; font-weight: 600; line-height: 1.6; }
+.sample-task-count { font-size: 12px; color: #626b79; white-space: nowrap; padding-top: 3px; font-variant-numeric: tabular-nums; }
+.sample-message { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; line-height: 1.85; color: #3c4655; }
+.sample-log { padding: 14px 16px; margin: 14px 0; border-radius: 4px; background: #f7f8fa; }
+.sample-label { font-size: 12px; font-weight: 500; color: #626b79; margin: 16px 0 8px; }
+.sample-task-links { display: flex; flex-direction: column; gap: 8px; }
+.error-sample li { margin-bottom: 3px; line-height: 1.8; }
+.error-sample summary { padding: 3px 0; font-size: 11px; color: #8a919d; }
+.sample-placeholder { padding: 22px 0; border-top: 1px solid #eceef1; background: #fff; color: #8a919d; font-size: 12px; }
+.pending-task { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; padding: 12px 0; border-top: 1px solid #eceef1; }
+.pending-task:first-child { border-top: 0; padding-top: 0; }
+#pending-section, #narrative-section { border: 0; border-top: 1px solid #e7e9ed; border-radius: 0; }
+#pending-section > .card-body, #narrative-section > .card-body, #narrative-section > summary { padding-left: 0 !important; padding-right: 0 !important; }
+#report-advanced > summary, #form-advanced > summary { padding: 6px 0; font-size: 11px; }
+#narrative-section > summary { list-style: none; font-size: 12px; }
+#narrative-section > summary::-webkit-details-marker { display: none; }
+#narrative-section > summary::before { content: '›'; color: #8a919d; margin-right: 6px; }
+#narrative-section[open] > summary::before { content: '⌄'; }
+.narrative-content p, .narrative-content li { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.8; }
+.narrative-evidence-links { display: flex; flex-wrap: wrap; gap: 8px; }
+.narrative-finding { border-top: 1px solid #e7e9ed; padding-top: 14px; margin-top: 14px; }
+.log-excerpt { font-family: var(--bs-font-monospace); font-size: 11px; line-height: 1.75; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
+.answer { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.85; }
+.technical-wrap { overflow-wrap: anywhere; }
+.task-id { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-signature { max-width: 210px; overflow-wrap: anywhere; }
+.count-input { max-width: 120px; }
+table { min-width: 600px; }
+th { font-weight: 500; color: var(--bs-secondary-color) !important; }
+.collection-cell { min-width: 145px; }
+.cluster-progress { min-width: 65px; }
+.cluster-unavailable { border-left: 2px solid #c4cbd7; padding: 12px; background: #f7f8fa; }
+.cluster-unavailable p:last-child { margin-bottom: 0; }
+.batch-diagnostic { border: 1px solid #e7e9ed; border-radius: 4px; padding: 18px; background: #fafbfc; }
+.batch-diagnostic.diagnostic-danger { border-color: #edcdd2; background: #fffafb; }
+.batch-diagnostic.diagnostic-warning { border-color: #eee0c5; background: #fffdf8; }
+.batch-diagnostic.diagnostic-success { border-color: #d4e7dc; background: #fbfdfb; }
+.pipeline-steps { display: grid; grid-template-columns: repeat(5,minmax(0,1fr)); gap: 10px; }
+.pipeline-step { border: 1px solid #e7e9ed; border-radius: 4px; padding: 10px; background: #fff; overflow-wrap: anywhere; }
+.pipeline-step .step-number { color: #8a919d; margin-right: 5px; }
+.pipeline-step p { font-size: 12px; line-height: 1.7; margin: 7px 0 0; }
+.step-status { display: inline-block; font-size: 11px; border-radius: 4px; padding: 2px 6px; margin-top: 7px; background: #f0f2f5; color: #626b79; }
+.step-status.danger { background: #faedef; color: #a44b57; }
+.step-status.warning { background: #fbf3e1; color: #926e30; }
+.step-status.success { background: #edf5ef; color: #427b57; }
+.step-status.active { background: #edf2fe; color: #315de5; }
+#footer { font-size: 11px; color: #8a919d !important; }
+@media(max-width:767.98px) { .pipeline-steps { grid-template-columns: 1fr 1fr; } .pipeline-step:last-child { grid-column: 1 / -1; } }
+@media(max-width:575.98px) {
+  .navbar-brand { font-size: 18px !important; }
+  .navbar .nav-link { font-size: 11px; }
+  .navbar .container-fluid, .navbar .navbar-nav { gap: 12px !important; }
+  .language-switch { gap: 10px; }
+  .language-option { font-size: 11px; }
+  #analysis-form { grid-template-columns: minmax(0,1fr); gap: 8px; }
+  #analysis-form > .d-flex { grid-column: 1; grid-row: auto; margin-top: 6px; }
+  .error-sample { padding: 18px 0; }
+  .sample-log { padding: 12px; }
+  .sample-task-count { white-space: normal; }
+  .pending-task { gap: 8px; }
+  .progress-heading { align-items: flex-start; }
+}
+@media(max-width:399.98px) { .pipeline-steps { grid-template-columns: 1fr; } }
+/* 减少动画时仍通过阶段文字表达等待，不用估算出来的进度。 */
+@media(prefers-reduced-motion:reduce) {
+  *, *::before, *::after { transition: none !important; scroll-behavior: auto !important; }
+  .progress-indeterminate { animation: none; transform: translateX(100%); }
+}

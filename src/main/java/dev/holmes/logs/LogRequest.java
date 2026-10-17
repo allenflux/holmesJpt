@@ -8,10 +8,19 @@ import java.util.List;
 
 /** 批次参数独立于模型问题，拒绝任意查询文本和任意数据源地址。 */
 public record LogRequest(String source, String namespace, String mode, List<String> taskIds,
-                         int requestedCount, Instant from, Instant to, boolean archiveRequired) {
+                         int requestedCount, Instant from, Instant to, boolean archiveRequired, String narrative,
+                         boolean automaticWindow) {
+    public LogRequest(String source, String namespace, String mode, List<String> taskIds,
+                      int requestedCount, Instant from, Instant to, boolean archiveRequired, String narrative) {
+        this(source, namespace, mode, taskIds, requestedCount, from, to, archiveRequired, narrative, false);
+    }
+    public LogRequest(String source, String namespace, String mode, List<String> taskIds,
+                      int requestedCount, Instant from, Instant to, boolean archiveRequired) {
+        this(source, namespace, mode, taskIds, requestedCount, from, to, archiveRequired, "none");
+    }
     public static LogRequest parse(JsonNode node, LogConfig config) {
         if (node == null || !node.isObject()) throw new IllegalArgumentException("请求必须是 JSON 对象");
-        SetValidator.fields(node, java.util.Set.of("source", "namespace", "selection", "attempt_scope", "raw_archive"));
+        SetValidator.fields(node, java.util.Set.of("source", "namespace", "selection", "attempt_scope", "raw_archive", "narrative", "log_window"));
         String source = text(node, "source", config.source());
         if (!source.equals(config.source())) throw new IllegalArgumentException("未知日志来源");
         String namespace = text(node, "namespace", "prod");
@@ -50,7 +59,12 @@ public record LogRequest(String source, String namespace, String mode, List<Stri
             throw new IllegalArgumentException("首版仅支持 final_failed");
         String archive = text(node, "raw_archive", "none");
         if (!archive.equals("none") && !archive.equals("required")) throw new IllegalArgumentException("raw_archive 必须是 none 或 required");
-        return new LogRequest(source, namespace, mode, List.copyOf(ids), count, from, to, archive.equals("required"));
+        String narrative = text(node, "narrative", "none");
+        if (!List.of("none", "llm").contains(narrative)) throw new IllegalArgumentException("narrative 必须是 none 或 llm");
+        String window = text(node, "log_window", "selection");
+        if (!List.of("selection", "automatic").contains(window)) throw new IllegalArgumentException("log_window 必须是 selection 或 automatic");
+        return new LogRequest(source, namespace, mode, List.copyOf(ids), count, from, to, archive.equals("required"), narrative,
+                window.equals("automatic"));
     }
 
     static boolean validId(String value) { return value != null && value.matches("[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}"); }

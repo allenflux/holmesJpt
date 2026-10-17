@@ -1,6 +1,8 @@
 package dev.holmes;
 
 import dev.holmes.logs.LogConfig;
+import dev.holmes.logs.LogNarrativeGenerator;
+import dev.holmes.logs.LogNarratives;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -20,12 +22,34 @@ class WebStatusTest {
         assertFalse(status.path("snapshot").path("ready").asBoolean());
         assertFalse(status.path("capabilities").path("ask").asBoolean());
         assertTrue(status.path("capabilities").path("logs").asBoolean());
+        assertFalse(status.path("capabilities").path("log_narrative").asBoolean());
+        assertEquals("none", status.path("defaults").path("narrative").asText());
         assertEquals("grafana", status.path("data_mode").asText());
         assertEquals(2, status.path("namespaces").size());
         assertEquals("dev", status.path("namespaces").get(0).asText());
         assertFalse(status.toString().contains("private-test-token"));
         assertFalse(status.toString().contains("private-grafana.example"));
         assertFalse(status.toString().contains(directory.toString()));
+    }
+
+    @Test void configuredModelPublishesConsentMetadataWithoutEnablingOutboundByDefault() {
+        var generator = new LogNarrativeGenerator((messages, tools) -> {
+            fail("读取网页配置不能触发模型"); return null;
+        }, "configured-test-model", "https://model.example/v1");
+        var status = new WebStatus(config(null, false), false, false, true, generator).get();
+        assertTrue(status.path("capabilities").path("log_narrative").asBoolean());
+        assertEquals("configured-test-model", status.path("log_narrative").path("model").asText());
+        assertEquals("https://model.example/v1", status.path("log_narrative").path("destination").asText());
+        assertEquals("none", status.path("defaults").path("narrative").asText());
+        assertFalse(status.toString().contains("private-test-token"));
+        assertFalse(status.toString().contains("private-grafana.example"));
+    }
+
+    @Test void demoCanEnableLocalExplanationByDefault() {
+        var status = new WebStatus(config(Path.of("examples/logs/tasks.json"), true), true, true,
+                false, LogNarratives.from(Map.of(), true)).get();
+        assertTrue(status.path("log_narrative").path("demo").asBoolean());
+        assertEquals("llm", status.path("defaults").path("narrative").asText());
     }
 
     @Test void syntheticFixtureGivesFixedWindowAndCorrectFailedTaskCount() {

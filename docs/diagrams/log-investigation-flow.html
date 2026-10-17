@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>从失败任务到工程师处理卡片</title>
+  <style>
+    /* 默认浅色与本机字体回退；图表离线可读，不请求外部资源。 */
+    *{box-sizing:border-box}body{margin:0;padding:24px;background:#f5f5f5;color:#2d3142;font-family:'Geist','PingFang SC','Noto Sans SC','Microsoft YaHei',system-ui,sans-serif}
+    main{max-width:1280px;min-width:0;margin:auto}.diagram-container{width:100%;overflow-x:auto}svg{display:block;width:100%;min-width:1280px}
+    .title{font-family:'Instrument Serif','Songti SC','Noto Serif SC',serif;font-size:40px;font-weight:400;fill:#2d3142}
+    .name{font-family:'Geist','PingFang SC','Noto Sans SC','Microsoft YaHei',sans-serif;font-size:16px;font-weight:600;fill:#2d3142}
+    .body,.slot,.legend,.arrow-label{font-family:'Geist','PingFang SC','Noto Sans SC','Microsoft YaHei',sans-serif;font-size:16px;font-weight:400;fill:#4f5d75}
+    .slot{fill:#5a6580}.number{font-family:'Geist Mono',ui-monospace,monospace;font-size:12px;fill:#4f5d75}.eyebrow{font-family:'Geist Mono',ui-monospace,monospace;font-size:8px;letter-spacing:.14em;fill:#4f5d75}
+    .arrow-label{font-size:12px}.note{margin:12px 0 0;font-size:14px;line-height:1.8;color:#4f5d75}
+    @media print{body{padding:0}.diagram-container{overflow-x:visible}svg{min-width:0}}
+  </style>
+</head>
+<body>
+<main>
+  <div class="diagram-container">
+    <svg viewBox="0 0 1280 720" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="log-investigation-flow-title log-investigation-flow-desc">
+      <title id="log-investigation-flow-title">从失败任务到工程师处理卡片</title>
+      <desc id="log-investigation-flow-desc">先固定失败任务名单，再关联错误日志、提炼典型样本，生成可下载的工程师处理卡片；无日志或无明确错误的任务保留在待补证据列表，模型可按需调用本批只读证据工具辅助解释；候选错误由工程师复核，不能认定最终根因。</desc>
+      <defs>
+        <marker id="log-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#4f5d75"/></marker>
+        <marker id="log-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#bf4520"/></marker>
+      </defs>
+      <rect width="1280" height="720" fill="#f5f5f5"/>
+      <text class="eyebrow" x="40" y="32">PROCESS · STAGE FRAMEWORK · DIAGRAM DESIGN · SLIDE-16X9</text>
+      <text class="title" x="40" y="84">从失败任务到工程师处理卡片</text>
+      <text class="body" x="40" y="124">一键发现：自动查最近 24 小时、最多 50 个失败任务；按样本频率交付工程师。</text>
+
+      <!-- 连接先于节点绘制；主线与证据不足旁路互不叠线。 -->
+      <line x1="280" y1="288" x2="340" y2="288" stroke="#4f5d75" stroke-width="1.6" marker-end="url(#log-arrow)"/>
+      <line x1="580" y1="288" x2="640" y2="288" stroke="#4f5d75" stroke-width="1.6" marker-end="url(#log-arrow)"/>
+      <line x1="880" y1="288" x2="940" y2="288" stroke="#bf4520" stroke-width="1.6" marker-end="url(#log-arrow-accent)"/>
+      <path d="M 460 400 V 480 Q 460 488 468 488 H 884 Q 892 488 892 496 V 500" fill="none" stroke="#4f5d75" stroke-width="1.4" stroke-dasharray="5,4" marker-end="url(#log-arrow)"/>
+      <path d="M 760 400 V 456 Q 760 464 768 464 H 1044 Q 1052 464 1052 472 V 500" fill="none" stroke="#4f5d75" stroke-width="1.4" stroke-dasharray="5,4" marker-end="url(#log-arrow)"/>
+      <g data-label="no-logs"><rect x="468" y="428" width="64" height="24" fill="#f5f5f5"/><text class="arrow-label" x="500" y="444" text-anchor="middle">无日志</text></g>
+      <g data-label="no-error"><rect x="768" y="412" width="112" height="24" fill="#f5f5f5"/><text class="arrow-label" x="824" y="428" text-anchor="middle">无明确错误</text></g>
+
+      <g data-node="FAILED_TASKS">
+        <rect x="40" y="176" width="240" height="224" rx="6" fill="#f5f5f5"/>
+        <rect x="40" y="176" width="240" height="224" rx="6" fill="#f5f5f5" stroke="#2d3142"/>
+        <text class="number" x="56" y="204">01</text><text class="name" x="88" y="204">失败任务</text>
+        <text class="slot" x="56" y="236">输入</text><text class="body" x="56" y="260">当前失败记录</text>
+        <text class="slot" x="56" y="292">处理</text><text class="body" x="56" y="316">自动定时间、固化名单</text>
+        <text class="slot" x="56" y="348">输出</text><text class="body" x="56" y="372">待查任务与时间范围</text>
+      </g>
+      <g data-node="ERROR_LOGS">
+        <rect x="340" y="176" width="240" height="224" rx="6" fill="#f5f5f5"/>
+        <rect x="340" y="176" width="240" height="224" rx="6" fill="#f5f5f5" stroke="#2d3142"/>
+        <text class="number" x="356" y="204">02</text><text class="name" x="388" y="204">关联错误日志</text>
+        <text class="slot" x="356" y="236">输入</text><text class="body" x="356" y="260">业务 ID 与查询时间窗</text>
+        <text class="slot" x="356" y="292">处理</text><text class="body" x="356" y="316">查关联日志与错误事件</text>
+        <text class="slot" x="356" y="348">输出</text><text class="body" x="356" y="372">错误证据或待补证据</text>
+      </g>
+      <g data-node="TYPICAL_SAMPLES">
+        <rect x="640" y="176" width="240" height="224" rx="6" fill="#f5f5f5"/>
+        <rect x="640" y="176" width="240" height="224" rx="6" fill="#f5f5f5" stroke="#2d3142"/>
+        <text class="number" x="656" y="204">03</text><text class="name" x="688" y="204">提炼典型样本</text>
+        <text class="slot" x="656" y="236">输入</text><text class="body" x="656" y="260">已关联的错误证据</text>
+        <text class="slot" x="656" y="292">处理</text><text class="body" x="656" y="316">同类按频率排，选样本</text>
+        <text class="slot" x="656" y="348">输出</text><text class="body" x="656" y="372">样本与影响任务数</text>
+      </g>
+      <g data-node="ENGINEER_CARD">
+        <rect x="940" y="176" width="300" height="224" rx="6" fill="#f5f5f5"/>
+        <rect x="940" y="176" width="300" height="224" rx="6" fill="rgba(191,69,32,0.08)" stroke="#bf4520"/>
+        <text class="number" x="956" y="204" style="fill:#bf4520">04</text><text class="name" x="988" y="204">工程师处理卡片</text>
+        <text class="slot" x="956" y="236">输入</text><text class="body" x="956" y="260">典型样本与证据链接</text>
+        <text class="slot" x="956" y="292">处理</text><text class="body" x="956" y="316">补负责人角色与建议</text>
+        <text class="slot" x="956" y="348">输出</text><text class="body" x="956" y="372">单卡下载，工程师复核</text>
+      </g>
+      <text class="body" x="40" y="532">配置 LLM 后：自动读取概览，自主查证，给建议</text>
+      <text class="body" x="40" y="560">错误样本 · 代表时间线 · 具体证据 · 任务对比</text>
+      <text class="legend" x="40" y="588">仅本批脱敏数据，最多 4 轮模型、6 次只读取证</text>
+      <g data-node="NEEDS_EVIDENCE">
+        <rect x="728" y="500" width="488" height="104" rx="6" fill="#f5f5f5"/>
+        <rect x="728" y="500" width="488" height="104" rx="6" fill="#ececec" stroke="#4f5d75" stroke-dasharray="5,4"/>
+        <text class="name" x="752" y="532">待补证据</text>
+        <text class="body" x="752" y="560">保留任务，核对 Task → Prompt 映射与时间窗</text>
+        <text class="body" x="752" y="584">没有日志或明确错误，不让模型补造错误。</text>
+      </g>
+      <line x1="40" y1="652" x2="1240" y2="652" stroke="#bfc0c0" stroke-width="0.8"/>
+      <text class="legend" x="40" y="684">实线：有错误证据继续　　虚线：证据不足，保留任务待补　　候选错误不等于最终根因</text>
+    </svg>
+  </div>
+  <p class="note">主图只保留工程师处理主线。分页、归档、模型预算与详细质量标记不占主展示；候选错误可先交工程师复核，最终执行与根因需要另行验证。使用本机字体回退，无外部网络资源。</p>
+</main>
+</body>
+</html>

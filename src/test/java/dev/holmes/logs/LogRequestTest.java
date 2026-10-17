@@ -22,6 +22,18 @@ class LogRequestTest {
         assertEquals(List.of("task-a", "task-b"), result.taskIds());
         assertEquals(2, result.requestedCount());
         assertFalse(result.archiveRequired());
+        assertEquals("none", result.narrative());
+    }
+
+    @Test void narrativeDefaultsToNoneAndOnlyExplicitLlmEnablesIt() {
+        assertEquals("llm", LogRequest.parse(explicit().put("narrative", "llm"), config).narrative());
+        assertEquals("none", LogRequest.parse(explicit().put("narrative", "none"), config).narrative());
+        for (String value : List.of("LLM", "automatic", ""))
+            assertThrows(IllegalArgumentException.class, () -> LogRequest.parse(explicit().put("narrative", value), config));
+        assertThrows(IllegalArgumentException.class, () -> LogRequest.parse(explicit().put("narrative", true), config));
+        LogRequest parsed = LogRequest.parse(explicit(), config);
+        assertEquals("none", new LogRequest(parsed.source(), parsed.namespace(), parsed.mode(), parsed.taskIds(),
+                parsed.requestedCount(), parsed.from(), parsed.to(), parsed.archiveRequired()).narrative());
     }
 
     @Test void acceptsOnlyNoneOrRequiredArchiveAndFinalFailedAttemptScope() {

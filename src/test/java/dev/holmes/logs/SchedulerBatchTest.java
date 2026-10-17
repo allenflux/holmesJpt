@@ -44,12 +44,62 @@ class SchedulerBatchTest {
             assertEquals("TASK_ONLY", task.path("association_scope").asText());
             assertEquals("INCOMPLETE", task.path("signature").asText());
             assertEquals("INCOMPLETE_EVIDENCE", task.path("analysis_status").asText());
+            assertEquals("COLLECTED", task.path("collection_status").asText());
+            assertEquals(1, task.path("collection_event_count").asInt());
+            assertTrue(task.path("collection_limitations").isEmpty());
+            assertFalse(result.path("collection_incomplete").asBoolean());
+            assertTrue(result.path("attribution_incomplete").asBoolean());
             assertEquals("CUDA_OOM", task.path("observed_signatures").get(0).asText());
             assertTrue(result.path("evidence").get(0).path("candidate_only").asBoolean());
             assertTrue(result.path("evidence").get(0).path("attempt_id").isNull());
             assertEquals("CUDA_OOM", result.path("observed_clusters").get(0).path("signature").asText());
             assertEquals(1, result.path("observed_clusters").get(0).path("task_count").asInt());
         } finally { gate.countDown(); }
+    }
+
+    @Test void taskOnlyCollectionAcrossNineStreamsDoesNotInventSkippedContextCollection() throws Exception {
+        LogConfig config = fixtureConfig(directory, Map.of());
+        AtomicInteger calls = new AtomicInteger();
+        LogSource logs = (query, maxEvents, maxBytes, deadline) -> {
+            calls.incrementAndGet();
+            List<LogEvent> events = java.util.stream.IntStream.range(0, 9).mapToObj(i -> new LogEvent(
+                    Instant.parse("2026-10-15T05:13:00Z"),
+                    "{\"task_id\":\"remote-task-1\",\"error_message\":\"CUDA out of memory\"}",
+                    Map.of("namespace", "prod", "pod", "synthetic-worker-" + i), "synthetic-event-" + i)).toList();
+            return new FetchResult(events, true, List.of(), 900);
+        };
+        try (var service = service(config, asynchronous(request -> selected()), logs)) {
+            var result = service.await(service.submit(fixtureRequest()).path("batch_id").asText());
+
+            assertEquals(1, calls.get());
+            var task = result.path("tasks").get(0);
+            assertEquals("COLLECTED", task.path("collection_status").asText());
+            assertEquals(9, task.path("collection_event_count").asInt());
+            assertFalse(task.path("collection_limitations").toString().contains("CONTEXT_STREAM_LIMIT"));
+            assertFalse(task.path("quality_flags").toString().contains("INCOMPLETE_INPUT"));
+            assertFalse(result.path("collection_incomplete").asBoolean());
+            assertTrue(result.path("attribution_incomplete").asBoolean());
+            assertEquals("PARTIAL", result.path("state").asText());
+            assertEquals("INCOMPLETE", task.path("signature").asText());
+        }
+    }
+
+    @Test void incompleteTaskSelectionDoesNotMislabelSuccessfulLogCollection() throws Exception {
+        LogConfig config = fixtureConfig(directory, Map.of());
+        var fixed = new TaskSnapshot().select(config.tasksFile(), LogRequest.parse(
+                LogInvestigationServiceTest.explicit("none", "task-B"), config));
+        TaskSource source = asynchronous(request -> new TaskSnapshot.Selection(fixed.tasks(), fixed.observedAt(),
+                List.of("TASK_SELECTION_INCOMPLETE", "SCHEDULER_PAGE_GAP")));
+        LogSource logs = (query, maxEvents, maxBytes, deadline) -> new FetchResult(List.of(), true, List.of(), 37);
+        try (var service = service(config, source, logs)) {
+            var result = service.await(service.submit(fixtureRequest()).path("batch_id").asText());
+
+            assertFalse(result.path("selection_complete").asBoolean());
+            assertFalse(result.path("collection_incomplete").asBoolean());
+            assertFalse(result.path("attribution_incomplete").asBoolean());
+            assertEquals("NO_MATCHES", result.path("tasks").get(0).path("collection_status").asText());
+            assertEquals("PARTIAL", result.path("state").asText());
+        }
     }
 
     @Test void recoveryUsesFixedTasksWithoutRefetchAndKeepsUnknownAttemptScope() throws Exception {

@@ -1,3 +1,4 @@
+<aside style="border:1px solid #cfd6df;padding:16px;margin:0 0 24px;background:#f4f5f7"><p><strong>当前实现说明（2026-10-17）：</strong>下文是历史设计方案，不能作为当前已实现能力的证明。当前线上统计 API 只提供 <code>TASK_ONLY</code> 状态观察，不能凭 <code>task_id = prompt_id</code> 约定替代逐任务的 Attempt、Prompt、重试及最终执行映射；缺少映射仍可查询候选日志。只读 Token 已验证可读取授权目标日志，v1.2 支持结构化异常摘要。线上任务源的最终执行映射仍未接入，日志模式已接入按需模型解释；旧报告 <code>narrative_status=NOT_REQUESTED</code> 表示该批次未请求，零可用证据会跳过模型调用；日志可读不能替代最终执行归属核验。详见<a href="日志调查流程与排障.md">日志调查流程与排障</a>和<a href="diagrams/log-investigation-flow.html">当前流程图</a>。</p></aside>
 <h1>Overview</h1>
 <p>当前日志分散在多个 Pod 和组件中，排查一次失败任务需要反复切换日志。Holmes Log 要在现有 Holmes Java 代码上增加任务级日志调查能力：输入一批失败任务，关联所有相关组件的日志，找出共同失败模式，并给出可核验的关键证据。</p>
 <p>已知业务关联约定为 <strong>调度器 task_id = ComfyUI prompt_id</strong>。第一版日志来源限定为指定 Grafana 面板背后的 VictoriaLogs 数据源，覆盖该来源已采集、当前账号可读取的所有 Pod。大日志不在 Holmes 本机长期保存；需要归档的日志包使用指定的 FluxDrop。</p>

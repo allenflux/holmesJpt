@@ -140,6 +140,47 @@ class TaskSnapshotTest {
         assertNotEquals(first, other);
     }
 
+    @Test void schedulerSourceFactsRoundTripWithoutReplacingVerifiedFailureOrAttemptTimes() throws Exception {
+        ObjectNode task = failed("task-a");
+        var facts = new LogModels.SchedulerFacts("source-record", "generate_video", "FAILED",
+                Instant.parse("2026-10-15T04:55:00Z"), Instant.parse("2026-10-15T06:20:00Z"));
+        task.set("scheduler_facts", TaskSnapshot.schedulerFactsJson(facts));
+
+        var selected = source.select(write(snapshot(task)), explicit("task-a")).tasks().getFirst();
+
+        assertEquals(facts, selected.schedulerFacts());
+        assertEquals(facts, TaskSnapshot.schedulerFactsFromJson(TaskSnapshot.schedulerFactsJson(selected.schedulerFacts())));
+        assertEquals(Instant.parse("2026-10-15T05:55:00Z"), selected.failedAt());
+        assertEquals(Instant.parse("2026-10-15T05:54:00Z"), selected.finalAttempt().endedAt());
+        assertEquals(LogModels.AssociationScope.VERIFIED_ATTEMPTS, selected.associationScope());
+    }
+
+    @Test void oldSnapshotsAndBothTaskConstructorsKeepMissingSourceFactsUnknown() throws Exception {
+        var old = source.select(write(snapshot(failed("task-a"))), explicit("task-a")).tasks().getFirst();
+        assertNull(old.schedulerFacts()); assertNull(TaskSnapshot.schedulerFactsJson(null));
+        assertNull(TaskSnapshot.schedulerFactsFromJson(null)); assertNull(TaskSnapshot.schedulerFactsFromJson(Json.MAPPER.nullNode()));
+        assertNull(TaskSnapshot.schedulerFactsFromJson(Json.MAPPER.createObjectNode().path("missing")));
+        var eight = new LogModels.Task("ref", "task", "failed", List.of(), "", "", null, "v1");
+        var nine = new LogModels.Task("ref", "task", "failed", List.of(), "", "", null, "v1", LogModels.AssociationScope.TASK_ONLY);
+        assertNull(eight.schedulerFacts()); assertNull(nine.schedulerFacts());
+        assertEquals(LogModels.AssociationScope.VERIFIED_ATTEMPTS, eight.associationScope());
+        assertEquals(LogModels.AssociationScope.TASK_ONLY, nine.associationScope());
+    }
+
+    @Test void sourceFactsRejectNonWhitelistedOrInvalidValuesWithoutEchoingThem() {
+        ObjectNode valid = TaskSnapshot.schedulerFactsJson(new LogModels.SchedulerFacts("r1", "type", "FAILED",
+                Instant.parse("2026-10-15T05:00:00Z"), Instant.parse("2026-10-15T05:01:00Z")));
+        for (Consumer<ObjectNode> mutation : List.<Consumer<ObjectNode>>of(
+                node -> node.put("prompt_id", "private-prompt-secret"), node -> node.putObject("task_type").put("value", "secret"),
+                node -> node.put("error_code", "secret\ncontrol"), node -> node.put("error_code", "secret".repeat(100)),
+                node -> node.put("record_id", "private/invalid"), node -> node.put("created_at", "private-secret-time"),
+                node -> node.put("updated_at", "2026-10-15T04:59:00Z"))) {
+            ObjectNode invalid = valid.deepCopy(); mutation.accept(invalid);
+            TaskSnapshot.Unprocessable failure = assertThrows(TaskSnapshot.Unprocessable.class, () -> TaskSnapshot.schedulerFactsFromJson(invalid));
+            assertFalse(failure.getMessage().contains("secret")); assertFalse(failure.getMessage().contains("private"));
+        }
+    }
+
     private Path write(ObjectNode snapshot) throws Exception {
         Path file = directory.resolve("tasks.json"); Files.writeString(file, snapshot.toString()); return file;
     }

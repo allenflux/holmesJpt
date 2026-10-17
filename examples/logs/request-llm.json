@@ -1,0 +1,13 @@
+{
+  "source": "scheduler-victorialogs",
+  "namespace": "prod",
+  "selection": {
+    "mode": "latest_failed",
+    "requested_count": 6,
+    "from": "2026-10-15T05:00:00Z",
+    "to": "2026-10-15T06:00:00Z"
+  },
+  "attempt_scope": "final_failed",
+  "raw_archive": "none",
+  "narrative": "llm"
+}

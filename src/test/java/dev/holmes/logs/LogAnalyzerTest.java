@@ -183,14 +183,14 @@ class LogAnalyzerTest {
         var otherRestart = analyzer.analyze(List.of(task("a")), List.of(
                 event(5, head, "pod", "1"),
                 new LogEvent(START.plusSeconds(6), "RuntimeError: model alpha failed", labels("pod", "prod", "1"), "2")), "prod", true, List.of());
-        assertEquals(Map.of("UNKNOWN", 1), counts(otherRestart));
+        assertEquals(Map.of("EXECUTION_ERROR", 1), counts(otherRestart));
         assertFalse(otherRestart.path("evidence").get(0).path("excerpt").asText().contains("RuntimeError"));
         Map<String, String> missing = new HashMap<>(labels("pod", "prod", "0"));
         missing.remove("restart");
         var missingRestart = analyzer.analyze(List.of(task("a")), List.of(
                 new LogEvent(START.plusSeconds(5), head, missing, "1"),
                 new LogEvent(START.plusSeconds(6), "RuntimeError: model alpha failed", missing, "2")), "prod", true, List.of());
-        assertEquals(Map.of("UNKNOWN", 1), counts(missingRestart));
+        assertEquals(Map.of("EXECUTION_ERROR", 1), counts(missingRestart));
         assertTrue(hasFlag(missingRestart, "MISSING_RESTART"));
     }
 
@@ -230,6 +230,225 @@ class LogAnalyzerTest {
                 "scheduler", "1")), "prod", true, List.of());
         assertEquals(Map.of("UNKNOWN", 1), counts(report));
         assertEquals(1, report.path("evidence").size());
+    }
+
+    @Test void explicitFailureEventsWithoutRecognizableExceptionRemainObservedFailures() {
+        for (String name : List.of("execution_error", "execution_failed", "execution_failure", "task_failed", "task_failure", "EXECUTION_ERROR")) {
+            ObjectNode payload = com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.objectNode()
+                    .put("task_id", "task-a").put("event", name).put("level", "INFO");
+            payload.putObject("data").put("status", "error").put("node_id", "node-7");
+            var report = analyzer.analyze(List.of(taskOnly("a")), List.of(event(5, payload.toString(), "pod", name)), "prod", true, List.of());
+
+            assertEquals("INCOMPLETE", resultTask(report, "task-a").path("signature").asText());
+            assertEquals("EXECUTION_ERROR", resultTask(report, "task-a").path("observed_signatures").get(0).asText(), name);
+            assertEquals(1, report.path("observed_error_event_count").asInt());
+            JsonNode evidence = report.path("evidence").get(0);
+            assertEquals(name, evidence.path("event").asText());
+            assertEquals("EXECUTION_ERROR", evidence.path("failure_signature").asText());
+            assertTrue(evidence.path("error_summary").asText().contains("exception details unavailable"));
+            assertFalse(evidence.has("exception_type"));
+            assertTrue(evidence.path("candidate_only").asBoolean());
+            assertTrue(evidence.path("attempt_id").isNull());
+        }
+    }
+
+    @Test void explicitFailureCanReadWhitelistedOriginalDataExceptionsWithoutScanningUserInput() {
+        for (String location : List.of("root", "data")) {
+            ObjectNode payload = com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.objectNode()
+                    .put("task_id", "task-a").put("event", "execution_error");
+            ObjectNode parent = location.equals("root") ? payload : payload.putObject("data");
+            ObjectNode original = parent.putObject("original_data").put("prompt_id", "task-a")
+                    .put("exception_type", "ValueError").put("exception_message", "synthetic model unavailable")
+                    .put("node_id", "7").put("node_type", "SyntheticNode");
+            original.put("prompt", "CUDA out of memory HTTP 403 RuntimeError: fake failure");
+            original.putObject("workflow").put("exception_type", "torch.OutOfMemoryError");
+            original.putObject("metrics").put("error", "request timed out");
+            var report = analyzer.analyze(List.of(taskOnly("a")), List.of(event(5, payload.toString(), "pod", location)), "prod", true, List.of());
+
+            JsonNode evidence = report.path("evidence").get(0);
+            assertTrue(evidence.path("failure_signature").asText().startsWith("EXCEPTION:ValueError:"));
+            assertEquals("ValueError", evidence.path("exception_type").asText());
+            assertEquals("synthetic model unavailable", evidence.path("exception_message").asText());
+            assertEquals("7", evidence.path("node_id").asText());
+            assertEquals("SyntheticNode", evidence.path("node_type").asText());
+            assertEquals("INCOMPLETE", resultTask(report, "task-a").path("signature").asText());
+            assertEquals(1, resultTask(report, "task-a").path("observed_signatures").size());
+            assertEquals(1, report.path("observed_error_event_count").asInt());
+        }
+    }
+
+    @Test void ordinaryOrLookalikeEventsCannotEnableOriginalDataErrorClassification() {
+        for (String name : List.of("execution_start", "task_started", "instruction_execution_error", "execution_error_example")) {
+            ObjectNode payload = com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.objectNode()
+                    .put("task_id", "task-a").put("event", name);
+            payload.putObject("data").putObject("original_data").put("event", "execution_error")
+                    .put("exception_type", "torch.OutOfMemoryError").put("exception_message", "CUDA out of memory")
+                    .put("prompt", "HTTP 403 RuntimeError: fake");
+            var report = analyzer.analyze(List.of(task("a")), List.of(event(5, payload.toString(), "pod", name)), "prod", true, List.of());
+
+            assertEquals("UNKNOWN", resultTask(report, "task-a").path("signature").asText(), name);
+            assertEquals(0, report.path("observed_error_event_count").asInt());
+            assertTrue(report.path("evidence").get(0).path("failure_signature").isNull());
+            assertFalse(report.path("evidence").get(0).has("error_summary"));
+        }
+    }
+
+    @Test void genericFailureDoesNotScanPromptMetricsOrNodeMetadataForSpecificCause() {
+        ObjectNode payload = com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.objectNode()
+                .put("task_id", "task-a").put("event", "execution_error");
+        ObjectNode original = payload.putObject("data").putObject("original_data")
+                .put("node_id", "HTTP 403").put("node_type", "OutOfMemoryError")
+                .put("message", "CUDA out of memory RuntimeError: injected generic message")
+                .put("prompt", "request timed out");
+        original.putObject("workflow").put("error_message", "CUDA out of memory");
+        original.putObject("metrics").put("exception_type", "RuntimeError");
+        var report = analyzer.analyze(List.of(task("a")), List.of(event(5, payload.toString(), "pod", "1")), "prod", true, List.of());
+
+        assertEquals("EXECUTION_ERROR", resultTask(report, "task-a").path("signature").asText());
+        assertFalse(report.path("evidence").get(0).has("exception_type"));
+        assertFalse(report.path("evidence").get(0).has("exception_message"));
+    }
+
+    @Test void whitelistedTracebackArrayCanIdentifyErrorButDoesNotReadObjectsInsideIt() {
+        ObjectNode payload = com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.objectNode()
+                .put("task_id", "task-a").put("event", "execution_error");
+        var traceback = payload.putObject("data").putObject("original_data").putArray("traceback");
+        traceback.add("Traceback (most recent call last):").add("ValueError: synthetic failure");
+        traceback.addObject().put("prompt", "CUDA out of memory");
+        var report = analyzer.analyze(List.of(task("a")), List.of(event(5, payload.toString(), "pod", "1")), "prod", true, List.of());
+
+        assertTrue(resultTask(report, "task-a").path("signature").asText().startsWith("EXCEPTION:ValueError:"));
+        assertEquals(1, report.path("observed_error_event_count").asInt());
+
+        traceback.removeAll().add("x".repeat(3_999)).add("RuntimeError: outside bounded traceback");
+        var bounded = analyzer.analyze(List.of(task("a")), List.of(event(5, payload.toString(), "pod", "2")), "prod", true, List.of());
+        assertEquals("EXECUTION_ERROR", resultTask(bounded, "task-a").path("signature").asText());
+    }
+
+    @Test void genericFailureAlongsideConcreteExceptionDoesNotMakeFinalAttemptAmbiguous() {
+        var report = analyzer.analyze(List.of(task("a")), List.of(
+                event(5, "{\"task_id\":\"task-a\",\"event\":\"execution_error\"}", "pod", "generic"),
+                event(6, "{\"task_id\":\"task-a\",\"event\":\"execution_error\",\"exception_type\":\"torch.OutOfMemoryError\",\"exception_message\":\"CUDA out of memory\"}", "pod", "concrete")), "prod", true, List.of());
+
+        assertEquals("CUDA_OOM", resultTask(report, "task-a").path("signature").asText());
+        assertEquals(2, report.path("observed_error_event_count").asInt());
+        assertFalse(hasFlag(report, "MULTIPLE_FAILURE_SIGNATURES"));
+        assertEquals("CUDA_OOM", report.path("evidence").get(1).path("failure_signature").asText());
+    }
+
+    @Test void authoritativeConcreteReasonCanRefineGenericFailureButNotConflictingConcreteLog() {
+        Task base = task("a");
+        Task authoritative = new Task(base.taskRef(), base.taskId(), base.status(), base.attempts(),
+                base.finalAttemptId(), "CUDA_OOM", base.failedAt(), "v1");
+        var generic = analyzer.analyze(List.of(authoritative), List.of(event(5,
+                "{\"task_id\":\"task-a\",\"event\":\"execution_error\"}", "pod", "1")), "prod", true, List.of());
+
+        assertEquals("CUDA_OOM", resultTask(generic, "task-a").path("signature").asText());
+        assertTrue(hasFlag(generic, "SIGNATURE_FROM_TASK_FAILURE_REASON"));
+        assertFalse(hasFlag(generic, "CONFLICTING_FAILURE_REASON"));
+        assertEquals("EXECUTION_ERROR", generic.path("evidence").get(0).path("failure_signature").asText());
+
+        var concrete = analyzer.analyze(List.of(authoritative), List.of(event(5,
+                "{\"task_id\":\"task-a\",\"event\":\"execution_error\",\"error_message\":\"request timed out\"}", "pod", "2")), "prod", true, List.of());
+        assertEquals("AMBIGUOUS", resultTask(concrete, "task-a").path("signature").asText());
+        assertTrue(hasFlag(concrete, "CONFLICTING_FAILURE_REASON"));
+    }
+
+    @Test void structuredErrorSummarySurvivesLargePayloadPrefixAndRedactsBeforeBounding() {
+        ObjectNode payload = com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.objectNode()
+                .put("task_id", "task-a").put("event", "execution_error");
+        ObjectNode data = payload.putObject("data");
+        data.put("executed_nodes", "synthetic-node-statistics-".repeat(300));
+        ObjectNode original = data.putObject("original_data").put("prompt_id", "task-a")
+                .put("exception_type", "ValueError")
+                .put("exception_message", "synthetic failure Authorization: Bearer private-value token=private-token " + "x".repeat(1_000))
+                .put("node_id", "node-7").put("node_type", "SyntheticNode");
+        original.put("prompt", "synthetic user input");
+        var report = analyzer.analyze(List.of(taskOnly("a")), List.of(event(5, payload.toString(), "pod", "1")), "prod", true, List.of());
+
+        JsonNode evidence = report.path("evidence").get(0), timeline = resultTask(report, "task-a").path("timeline").get(0);
+        assertTrue(evidence.path("excerpt").asText().startsWith("error_summary:"));
+        assertTrue(evidence.path("excerpt").asText().contains("ValueError"));
+        assertEquals("ValueError", evidence.path("exception_type").asText());
+        assertTrue(evidence.path("exception_message").asText().length() <= 600);
+        assertTrue(evidence.path("error_summary").asText().length() <= 800);
+        assertTrue(timeline.path("error_summary").asText().length() <= 800);
+        assertEquals(evidence.path("error_summary"), timeline.path("error_summary"));
+        assertEquals(evidence.path("failure_signature"), timeline.path("failure_signature"));
+        assertFalse(report.toString().contains("private-value"));
+        assertFalse(report.toString().contains("private-token"));
+        assertTrue(hasFlag(report, "EVIDENCE_EXCERPT_TRUNCATED"));
+    }
+
+    @Test void invalidExceptionTypesCannotTurnCredentialsIntoSignatureClassNames() {
+        for (var entry : Map.of(
+                "RuntimeError token=synthetic-token-secret", "synthetic-token-secret",
+                "RuntimeError API Key: synthetic-api-secret", "synthetic-api-secret",
+                "RuntimeError api_key=synthetic-key-secret", "synthetic-key-secret",
+                "A".repeat(300) + " token=synthetic-long-secret", "synthetic-long-secret").entrySet()) {
+            ObjectNode payload = com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.objectNode()
+                    .put("task_id", "task-a").put("event", "execution_error");
+            payload.putObject("data").putObject("original_data").put("exception_type", entry.getKey())
+                    .put("exception_message", "synthetic failure");
+            var report = analyzer.analyze(List.of(taskOnly("a")), List.of(event(5, payload.toString(), "pod", "1")), "prod", true, List.of());
+
+            JsonNode evidence = report.path("evidence").get(0);
+            assertTrue(evidence.path("failure_signature").asText().startsWith("EXCEPTION:UnrecognizedException:"));
+            assertFalse(evidence.path("error_summary").asText().contains(entry.getValue()));
+            assertFalse(report.toString().contains(entry.getValue()));
+            assertFalse(report.toString().contains(entry.getValue().replace("-", "")));
+            assertTrue(evidence.path("exception_type").asText().length() <= 256);
+        }
+    }
+
+    @Test void legitimateBoundedDottedExceptionTypesKeepSpecificClassification() {
+        for (String exception : List.of("builtins.ValueError", "package.Outer$InnerException", "A".repeat(256))) {
+            ObjectNode payload = com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.objectNode()
+                    .put("task_id", "task-a").put("exception_type", exception).put("exception_message", "synthetic failure");
+            var report = analyzer.analyze(List.of(task("a")), List.of(event(5, payload.toString(), "pod", "1")), "prod", true, List.of());
+            assertTrue(resultTask(report, "task-a").path("signature").asText().startsWith("EXCEPTION:" + exception + ":"));
+            assertEquals(exception, report.path("evidence").get(0).path("exception_type").asText());
+        }
+        ObjectNode payload = com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.objectNode()
+                .put("task_id", "task-a").put("exception_type", "torch.OutOfMemoryError");
+        var oom = analyzer.analyze(List.of(task("a")), List.of(event(5, payload.toString(), "pod", "1")), "prod", true, List.of());
+        assertEquals("CUDA_OOM", resultTask(oom, "task-a").path("signature").asText());
+        assertEquals("torch.OutOfMemoryError", oom.path("evidence").get(0).path("exception_type").asText());
+    }
+
+    @Test void requestsHttpErrorsInsideWhitelistedOriginalDataTakePriorityOverRuntimeError() {
+        for (var entry : Map.of("404", "Client", "503", "Server").entrySet()) {
+            ObjectNode payload = com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.objectNode()
+                    .put("task_id", "task-a").put("event", "execution_error");
+            payload.putObject("data").putObject("original_data").put("prompt_id", "task-a")
+                    .put("exception_type", "RuntimeError").put("exception_message",
+                            "Network error for https://example.invalid/assets/sample.mp4. Error: "
+                                    + entry.getKey() + " " + entry.getValue() + " Error: synthetic status for url: https://example.invalid/assets/sample.mp4");
+            var report = analyzer.analyze(List.of(taskOnly("a")), List.of(event(5, payload.toString(), "pod", "1")), "prod", true, List.of());
+
+            assertEquals("INCOMPLETE", resultTask(report, "task-a").path("signature").asText());
+            assertEquals("HTTP_" + entry.getKey(), resultTask(report, "task-a").path("observed_signatures").get(0).asText());
+            assertEquals("HTTP_" + entry.getKey(), report.path("evidence").get(0).path("failure_signature").asText());
+            assertEquals("RuntimeError", report.path("evidence").get(0).path("exception_type").asText());
+            assertEquals(1, report.path("observed_error_event_count").asInt());
+        }
+    }
+
+    @Test void requestsHttpErrorTextInsideUserWorkflowOrPromptCannotCreateHttpSignature() {
+        for (String name : List.of("task_started", "execution_error")) {
+            ObjectNode payload = com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.objectNode()
+                    .put("task_id", "task-a").put("event", name);
+            ObjectNode original = payload.putObject("data").putObject("original_data")
+                    .put("prompt", "404 Client Error: synthetic user input")
+                    .put("message", "503 Server Error: synthetic user input");
+            original.putObject("workflow").put("exception_message", "404 Client Error: fake workflow error");
+            original.putObject("metrics").put("exception_message", "503 Server Error: fake metrics error");
+            var report = analyzer.analyze(List.of(task("a")), List.of(event(5, payload.toString(), "pod", "1")), "prod", true, List.of());
+
+            assertEquals(name.equals("task_started") ? "UNKNOWN" : "EXECUTION_ERROR", resultTask(report, "task-a").path("signature").asText());
+            assertNotEquals("HTTP_404", report.path("evidence").get(0).path("failure_signature").asText());
+            assertNotEquals("HTTP_503", report.path("evidence").get(0).path("failure_signature").asText());
+        }
     }
 
     @Test void structuredExceptionFingerprintsIgnoreJsonWrappingAndDynamicIds() {
@@ -480,6 +699,97 @@ class LogAnalyzerTest {
         assertTrue(hasFlag(report, "MULTILINE_SAME_STREAM"));
     }
 
+    @Test void sourceRecordTaskAliasRetainsCandidateEvidenceAndObservedIdsWithoutFinalExecution() {
+        Task task = taskOnlyWithRecord("a", "scheduler-task-a");
+        var report = analyzer.analyze(List.of(task), List.of(event(5,
+                "{\"task_id\":\"scheduler-task-a\",\"prompt_id\":\"observed-comfy-prompt\",\"attempt_id\":\"observed-attempt\",\"instance_id\":\"observed-worker\",\"event\":\"execution_error\",\"exception_message\":\"HTTP 404\"}",
+                "pod", "1")), "prod", true, List.of());
+
+        JsonNode result = resultTask(report, "task-a"), evidence = report.path("evidence").get(0);
+        assertEquals("holmes-log-v1.3", report.path("rule_version").asText());
+        assertEquals("INCOMPLETE", result.path("signature").asText()); assertEquals("HTTP_404", result.path("observed_signatures").get(0).asText());
+        assertEquals("SOURCE_RECORD_TASK_ID_ATTEMPT_UNVERIFIED", evidence.path("association_basis").asText());
+        assertEquals("scheduler-task-a", evidence.path("observed_task_id").asText());
+        assertEquals("observed-comfy-prompt", evidence.path("observed_prompt_id").asText());
+        assertEquals("observed-attempt", evidence.path("observed_attempt_id").asText()); assertEquals("observed-worker", evidence.path("observed_instance_id").asText());
+        assertEquals("ref-a", evidence.path("task_ref").asText()); assertEquals("task-a", result.path("task_id").asText());
+        assertEquals("TASK_ONLY", evidence.path("association_scope").asText()); assertTrue(evidence.path("candidate_only").asBoolean());
+        assertTrue(evidence.path("attempt_id").isNull()); assertTrue(evidence.path("historical_attempt").isNull());
+        assertTrue(hasFlag(evidence, "TASK_FAILURE_FINALITY_UNVERIFIED")); assertTrue(hasFlag(evidence, "UNVERIFIED_PROMPT_ID"));
+        assertNull(task.failedAt()); assertNull(task.finalAttempt());
+    }
+
+    @Test void sourceRecordAliasCanMatchTaskLabelOrPromptButKeepsOriginalIdBasis() {
+        Task task = taskOnlyWithRecord("a", "scheduler-task-a");
+        Map<String, String> labels = new HashMap<>(labels("pod", "prod", "0")); labels.put("task_id", "scheduler-task-a");
+        var report = analyzer.analyze(List.of(task), List.of(
+                new LogEvent(START.plusSeconds(5), "HTTP 404", labels, "1"),
+                event(6, "{\"prompt_id\":\"scheduler-task-a\",\"exception_message\":\"HTTP 403\"}", "pod", "2"),
+                event(7, "{\"task_id\":\"task-a\",\"exception_message\":\"HTTP 500\"}", "pod", "3")), "prod", true, List.of());
+
+        assertEquals(3, report.path("evidence").size());
+        assertEquals("SOURCE_RECORD_TASK_ID_ATTEMPT_UNVERIFIED", report.path("evidence").get(0).path("association_basis").asText());
+        assertEquals("SOURCE_RECORD_TASK_ID_ATTEMPT_UNVERIFIED", report.path("evidence").get(1).path("association_basis").asText());
+        assertEquals("scheduler-task-a", report.path("evidence").get(1).path("observed_prompt_id").asText());
+        assertEquals("TASK_ID_ONLY_ATTEMPT_UNVERIFIED", report.path("evidence").get(2).path("association_basis").asText());
+        assertEquals("INCOMPLETE", resultTask(report, "task-a").path("signature").asText());
+    }
+
+    @Test void sourceRecordAliasesCollidingAcrossTasksCannotBeDisambiguatedByOtherIds() {
+        var report = analyzer.analyze(List.of(taskOnlyWithRecord("a", "shared-source-record"), taskOnlyWithRecord("b", "shared-source-record")),
+                List.of(event(5, "{\"task_id\":\"shared-source-record\",\"prompt_id\":\"task-a\",\"exception_message\":\"HTTP 404\"}", "pod", "1")), "prod", true, List.of());
+
+        assertEquals(0, report.path("evidence").size()); assertEquals(Map.of("INCOMPLETE", 2), counts(report));
+        assertTrue(hasFlag(resultTask(report, "task-a"), "ID_CONFLICT")); assertTrue(hasFlag(resultTask(report, "task-b"), "ID_CONFLICT"));
+    }
+
+    @Test void sourceRecordAliasCannotCollideWithAnotherLogicalTaskOrVerifiedPrompt() {
+        Task verified = new Task("ref-b", "task-b", "failed", List.of(new Attempt("try-b", "known-b-prompt", START, START.plusSeconds(60), "gpu-b")),
+                "try-b", "", START.plusSeconds(60), "v1");
+        for (String alias : List.of("task-b", "known-b-prompt")) {
+            var report = analyzer.analyze(List.of(taskOnlyWithRecord("a", alias), verified), List.of(event(5,
+                    "{\"task_id\":\"" + alias + "\",\"prompt_id\":\"task-a\",\"exception_message\":\"HTTP 404\"}", "pod", "1")), "prod", true, List.of());
+            assertEquals(0, report.path("evidence").size(), alias);
+            assertTrue(hasFlag(resultTask(report, "task-a"), "ID_CONFLICT")); assertTrue(hasFlag(resultTask(report, "task-b"), "ID_CONFLICT"));
+        }
+    }
+
+    @Test void sourceAliasStillRejectsConflictingOriginalIdsMultipleIdsAndOtherNamespace() {
+        Task task = taskOnlyWithRecord("a", "scheduler-task-a");
+        var report = analyzer.analyze(List.of(task, taskOnly("b")), List.of(
+                event(5, "{\"task_id\":\"scheduler-task-a\",\"prompt_id\":\"task-b\",\"exception_message\":\"HTTP 404\"}", "pod", "1"),
+                event(6, "{\"task_id\":\"scheduler-task-a\",\"data\":{\"task_id\":\"task-a\"},\"exception_message\":\"HTTP 404\"}", "pod", "2"),
+                new LogEvent(START.plusSeconds(7), "{\"task_id\":\"scheduler-task-a\",\"exception_message\":\"HTTP 404\"}", labels("pod", "other", "0"), "3")),
+                "prod", true, List.of());
+
+        assertEquals(0, report.path("evidence").size()); assertTrue(hasFlag(report, "ID_CONFLICT")); assertTrue(hasFlag(report, "CROSS_NAMESPACE_REJECTED"));
+    }
+
+    @Test void arbitraryUuidRecordLabelsAndInvalidFactsNeverCreateSourceAliases() {
+        for (Task task : List.of(taskOnly("a"), taskOnlyWithRecord("a", "invalid/source/id"))) {
+            Map<String, String> labels = new HashMap<>(labels("pod", "prod", "0")); labels.put("uuid", "scheduler-task-a"); labels.put("record_id", "scheduler-task-a");
+            var report = analyzer.analyze(List.of(task), List.of(
+                    new LogEvent(START.plusSeconds(5), "{\"uuid\":\"scheduler-task-a\",\"record_id\":\"scheduler-task-a\",\"exception_message\":\"HTTP 404\"}", labels, "1"),
+                    event(6, "{\"task_id\":\"scheduler-task-a\",\"exception_message\":\"HTTP 404\"}", "pod", "2")), "prod", true, List.of());
+            assertEquals(0, report.path("evidence").size());
+        }
+        Task verified = new Task("ref-a", "task-a", "failed", List.of(), "", "", START.plusSeconds(60), "v1", AssociationScope.VERIFIED_ATTEMPTS,
+                new LogModels.SchedulerFacts("scheduler-task-a", "type", "FAILED", START, START.plusSeconds(60)));
+        var report = analyzer.analyze(List.of(verified), List.of(event(5,
+                "{\"task_id\":\"scheduler-task-a\",\"exception_message\":\"HTTP 404\"}", "pod", "1")), "prod", true, List.of());
+        assertEquals(0, report.path("evidence").size());
+    }
+
+    @Test void duplicateLogicalTaskWithDifferentSourceAliasesCannotChooseOneSilently() {
+        var report = analyzer.analyze(List.of(taskOnlyWithRecord("a", "first-source-record"), taskOnlyWithRecord("a", "second-source-record")), List.of(event(5,
+                "{\"task_id\":\"first-source-record\",\"exception_message\":\"HTTP 404\"}", "pod", "1")), "prod", true, List.of());
+        assertEquals(0, report.path("evidence").size()); assertTrue(hasFlag(report, "TASK_ID_COLLISION"));
+        var hiddenCollision = analyzer.analyze(List.of(taskOnlyWithRecord("a", "first-source-record"), taskOnlyWithRecord("a", "second-source-record"),
+                taskOnlyWithRecord("b", "second-source-record")), List.of(event(5,
+                "{\"task_id\":\"second-source-record\",\"exception_message\":\"HTTP 404\"}", "pod", "1")), "prod", true, List.of());
+        assertEquals(0, hiddenCollision.path("evidence").size()); assertTrue(hasFlag(resultTask(hiddenCollision, "task-b"), "ID_CONFLICT"));
+    }
+
     private static Task task(String name) {
         return new Task("ref-" + name, "task-" + name, "failed", List.of(
                 new Attempt("attempt-" + name, "task-" + name, START, START.plusSeconds(60), "instance-" + name)),
@@ -489,6 +799,11 @@ class LogAnalyzerTest {
     private static Task taskOnly(String name) {
         return new Task("ref-" + name, "task-" + name, "failed", List.of(), "", "", null,
                 "record-7-updated-2026-10-15T05:01:00Z", AssociationScope.TASK_ONLY);
+    }
+
+    private static Task taskOnlyWithRecord(String name, String recordId) {
+        return new Task("ref-" + name, "task-" + name, "failed", List.of(), "", "", null, "source-observed", AssociationScope.TASK_ONLY,
+                new LogModels.SchedulerFacts(recordId, "generate_video", "FAILED", START, START.plusSeconds(60)));
     }
 
     private static LogEvent event(long seconds, String message, String pod, String id) {

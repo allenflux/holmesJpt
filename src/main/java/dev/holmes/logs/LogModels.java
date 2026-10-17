@@ -21,18 +21,33 @@ public final class LogModels {
     /** TASK_ONLY 只证明逻辑任务 ID 关联，不证明 prompt、重试或最终执行归属。 */
     public enum AssociationScope { VERIFIED_ATTEMPTS, TASK_ONLY }
 
+    /** 仅保留调度器统计行事实；创建/更新时间不是执行窗口，也不能证明最终失败。 */
+    public record SchedulerFacts(String recordId, String taskType, String errorCode, Instant createdAt, Instant updatedAt) {
+        public SchedulerFacts {
+            recordId = recordId == null ? "" : recordId;
+            taskType = taskType == null ? "" : taskType;
+            errorCode = errorCode == null ? "" : errorCode;
+        }
+    }
+
     public record Task(String taskRef, String taskId, String status, List<Attempt> attempts,
                        String finalAttemptId, String failureReason, Instant failedAt, String statusVersion,
-                       AssociationScope associationScope) {
+                       AssociationScope associationScope, SchedulerFacts schedulerFacts) {
         public Task {
             attempts = List.copyOf(attempts);
             associationScope = associationScope == null ? AssociationScope.VERIFIED_ATTEMPTS : associationScope;
+        }
+        // 旧报告与原调用方没有源元数据时保持原有归属语义。
+        public Task(String taskRef, String taskId, String status, List<Attempt> attempts,
+                    String finalAttemptId, String failureReason, Instant failedAt, String statusVersion,
+                    AssociationScope associationScope) {
+            this(taskRef, taskId, status, attempts, finalAttemptId, failureReason, failedAt, statusVersion, associationScope, null);
         }
         // 原快照与测试仍使用严格的已验证 attempt 语义，缺字段不能隐式启用回退。
         public Task(String taskRef, String taskId, String status, List<Attempt> attempts,
                     String finalAttemptId, String failureReason, Instant failedAt, String statusVersion) {
             this(taskRef, taskId, status, attempts, finalAttemptId, failureReason, failedAt, statusVersion,
-                    AssociationScope.VERIFIED_ATTEMPTS);
+                    AssociationScope.VERIFIED_ATTEMPTS, null);
         }
         public Attempt finalAttempt() {
             return attempts.stream().filter(a -> a.id().equals(finalAttemptId)).findFirst().orElse(null);

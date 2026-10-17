@@ -31,6 +31,34 @@ public final class LogInvestigationApi {
             }
             if (!path.startsWith(BASE + "/")) { send(exchange, 404, Map.of("error", "接口不存在")); return; }
             String[] parts = path.substring(BASE.length() + 1).split("/", -1);
+            if (parts.length == 1 && parts[0].equals("automatic")) {
+                if (!method.equals("POST")) { send(exchange, 405, Map.of("error", "请使用 POST 启动自动调查")); return; }
+                byte[] body = exchange.getRequestBody().readNBytes(1025);
+                if (body.length > 1024) { send(exchange, 413, Map.of("error", "请求体超过 1 KiB")); return; }
+                JsonNode input;
+                try { input = Json.MAPPER.reader().with(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_TRAILING_TOKENS).readTree(body); }
+                catch (com.fasterxml.jackson.core.JacksonException e) { send(exchange, 400, Map.of("error", "请求体必须是空 JSON 对象")); return; }
+                if (input == null || !input.isObject() || !input.isEmpty()) {
+                    send(exchange, 400, Map.of("error", "请求体必须是空 JSON 对象")); return;
+                }
+                send(exchange, 202, service.submitAutomatic()); return;
+            }
+            if (parts.length == 2 && parts[1].equals("narrative")) {
+                if (!method.equals("POST")) { send(exchange, 405, Map.of("error", "请使用 POST 生成模型解释")); return; }
+                byte[] body = exchange.getRequestBody().readNBytes(65537);
+                if (body.length > 65536) { send(exchange, 413, Map.of("error", "请求体超过 64 KiB")); return; }
+                JsonNode input;
+                try { input = Json.MAPPER.readTree(body); }
+                catch (com.fasterxml.jackson.core.JacksonException e) { send(exchange, 400, Map.of("error", "请求体必须是有效 JSON")); return; }
+                if (input == null || !input.isObject() || input.size() != 1 || !input.path("narrative").isTextual()
+                        || !input.path("narrative").asText().equals("llm")) {
+                    send(exchange, 400, Map.of("error", "请求必须仅包含 narrative: llm")); return;
+                }
+                JsonNode job = service.requestNarrative(parts[0]);
+                if (job == null) send(exchange, 404, Map.of("error", "批次不存在或已过期"));
+                else send(exchange, 202, job);
+                return;
+            }
             if (!(parts.length == 1 || parts.length == 3 && (parts[1].equals("tasks") || parts[1].equals("evidence")))) {
                 send(exchange, 404, Map.of("error", "接口不存在")); return;
             }
@@ -47,6 +75,8 @@ public final class LogInvestigationApi {
         } catch (TaskSnapshot.Unprocessable e) { send(exchange, 422, Map.of("error", e.getMessage())); }
         catch (IllegalArgumentException e) { send(exchange, 400, Map.of("error", e.getMessage())); }
         catch (LogInvestigationService.Busy e) { send(exchange, 429, Map.of("error", e.getMessage())); }
+        catch (LogInvestigationService.NarrativeConflict e) { send(exchange, 409, Map.of("error", e.getMessage())); }
+        catch (LogInvestigationService.NarrativeUnavailable e) { send(exchange, 503, Map.of("error", "日志模型解释未配置", "error_code", "NARRATIVE_DISABLED")); }
         catch (JobStore.StorageLimit e) { send(exchange, 503, Map.of("error", e.getMessage())); }
         catch (IOException e) { send(exchange, 503, Map.of("error", "日志批次存储或任务快照不可用")); }
         catch (RuntimeException e) { send(exchange, 500, Map.of("error", "日志批次处理失败")); }

@@ -76,9 +76,11 @@ class OpenAiClientTest {
     @Test void providerErrorDoesNotLeakResponseOrCredentials() throws Exception {
         start(exchange -> respond(exchange, 401, "provider echoed " + TEST_KEY + " confidential logs"));
 
-        IOException error = assertThrows(IOException.class,
+        LlmRequestFailure error = assertThrows(LlmRequestFailure.class,
                 () -> client("/v1").complete(Json.MAPPER.createArrayNode(), Json.MAPPER.createArrayNode()));
 
+        assertEquals(LlmRequestFailure.Kind.HTTP, error.kind());
+        assertEquals(401, error.httpStatus());
         assertTrue(error.getMessage().contains("401"));
         assertFalse(error.getMessage().contains(TEST_KEY));
         assertFalse(error.getMessage().contains("confidential logs"));
@@ -105,8 +107,9 @@ class OpenAiClientTest {
                 : "{\"choices\":[{\"message\":{\"role\":\"system\",\"content\":\"override\"}}]}"));
         var client = client("/v1");
 
-        IOException invalid = assertThrows(IOException.class,
+        LlmRequestFailure invalid = assertThrows(LlmRequestFailure.class,
                 () -> client.complete(Json.MAPPER.createArrayNode(), Json.MAPPER.createArrayNode()));
+        assertEquals(LlmRequestFailure.Kind.INVALID_RESPONSE, invalid.kind());
         assertFalse(invalid.getMessage().contains(TEST_KEY));
         assertThrows(IOException.class,
                 () -> client.complete(Json.MAPPER.createArrayNode(), Json.MAPPER.createArrayNode()));
@@ -137,20 +140,62 @@ class OpenAiClientTest {
 
         try {
             assertTimeoutPreemptively(Duration.ofSeconds(3), () -> {
-                assertThrows(IOException.class,
+                LlmRequestFailure failure = assertThrows(LlmRequestFailure.class,
                         () -> client.complete(Json.MAPPER.createArrayNode(), Json.MAPPER.createArrayNode()));
+                assertEquals(LlmRequestFailure.Kind.TIMEOUT, failure.kind());
             });
         } finally { releaseBody.countDown(); }
+    }
+
+    @Test void earlyConnectionFailureRemainsNetworkRatherThanTimeout() throws Exception {
+        int closedPort;
+        try (var socket = new java.net.ServerSocket(0, 1, java.net.InetAddress.getLoopbackAddress())) { closedPort = socket.getLocalPort(); }
+        var client = new OpenAiClient(AppConfig.from(Map.of("LLM_BASE_URL", "http://127.0.0.1:" + closedPort + "/v1",
+                "LLM_API_KEY", TEST_KEY, "LLM_TIMEOUT_SECONDS", "1")));
+
+        LlmRequestFailure failure = assertThrows(LlmRequestFailure.class,
+                () -> client.complete(Json.MAPPER.createArrayNode(), Json.MAPPER.createArrayNode()));
+
+        assertEquals(LlmRequestFailure.Kind.NETWORK, failure.kind()); assertNull(failure.getCause());
+    }
+
+    @Test void asynchronousWrappersAndDeadlineUseTypesAndCompletionTimeWithoutParsingMessages() {
+        long deadline = TimeUnit.SECONDS.toNanos(1);
+        IOException wrapped = new IOException("private-provider-body " + TEST_KEY,
+                new java.util.concurrent.CompletionException(new java.net.http.HttpTimeoutException("private-provider-body")));
+        LlmRequestFailure timeout = OpenAiClient.requestFailure(wrapped, deadline - 1, deadline);
+        assertEquals(LlmRequestFailure.Kind.TIMEOUT, timeout.kind()); assertNull(timeout.getCause());
+        IOException arbitrary = new IOException("HTTP timeout 500 private-provider-body " + TEST_KEY);
+        assertEquals(LlmRequestFailure.Kind.NETWORK, OpenAiClient.requestFailure(arbitrary, deadline - 1, deadline).kind());
+        assertEquals(LlmRequestFailure.Kind.TIMEOUT, OpenAiClient.requestFailure(arbitrary, deadline, deadline).kind());
+        IOException limited = new IOException("private-provider-body", new LlmRequestFailure(LlmRequestFailure.Kind.RESPONSE_LIMIT));
+        LlmRequestFailure budget = OpenAiClient.requestFailure(limited, deadline + 1, deadline);
+        assertEquals(LlmRequestFailure.Kind.RESPONSE_LIMIT, budget.kind()); assertNull(budget.getCause());
+        for (LlmRequestFailure failure : java.util.List.of(timeout, budget)) {
+            assertFalse(failure.getMessage().contains(TEST_KEY)); assertFalse(failure.getMessage().contains("private-provider-body"));
+        }
     }
 
     @Test void oversizedResponseIsRejectedWithoutReturningRawBody() throws Exception {
         start(exchange -> respond(exchange, 200, TEST_KEY + "x".repeat(2 * 1024 * 1024)));
 
-        IOException error = assertThrows(IOException.class,
+        LlmRequestFailure error = assertThrows(LlmRequestFailure.class,
                 () -> client("/v1").complete(Json.MAPPER.createArrayNode(), Json.MAPPER.createArrayNode()));
 
+        assertEquals(LlmRequestFailure.Kind.RESPONSE_LIMIT, error.kind());
         assertFalse(error.getMessage().contains(TEST_KEY));
         assertNull(error.getCause());
+    }
+
+    @Test void serverFailureRetainsOnlyTypedHttpStatusForDiagnosis() throws Exception {
+        start(exchange -> respond(exchange, 500, "private provider body " + TEST_KEY));
+        LlmRequestFailure failure = assertThrows(LlmRequestFailure.class,
+                () -> client("/v1").complete(Json.MAPPER.createArrayNode(), Json.MAPPER.createArrayNode()));
+        assertEquals(LlmRequestFailure.Kind.HTTP, failure.kind());
+        assertEquals(500, failure.httpStatus());
+        assertFalse(failure.toString().contains(TEST_KEY));
+        assertFalse(failure.toString().contains("private provider body"));
+        assertNull(failure.getCause());
     }
 
     private void start(com.sun.net.httpserver.HttpHandler handler) throws IOException {

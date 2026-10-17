@@ -56,6 +56,8 @@ class SchedulerTaskSourceTest {
         var task = selected.tasks().getFirst();
         assertEquals(AssociationScope.TASK_ONLY, task.associationScope());
         assertNull(task.failedAt()); assertTrue(task.attempts().isEmpty()); assertEquals("", task.finalAttemptId());
+        assertEquals("r6", task.schedulerFacts().recordId());
+        assertEquals("", task.schedulerFacts().taskType()); assertEquals("", task.schedulerFacts().errorCode());
         assertTrue(selected.limitations().containsAll(List.of("TASK_STATUS_FROM_SCHEDULER_API", "TASK_ATTEMPT_UNVERIFIED",
                 "SCHEDULER_CREATED_TIME_SELECTION", "SCHEDULER_NON_ATOMIC_PAGINATION")));
         assertFalse(selected.limitations().contains("TASK_SELECTION_INCOMPLETE"));
@@ -74,6 +76,56 @@ class SchedulerTaskSourceTest {
 
         assertEquals(List.of("inside", "at-from"), selected.tasks().stream().map(LogModels.Task::taskId).toList());
         assertTrue(selected.tasks().stream().allMatch(task -> task.failedAt() == null));
+        assertEquals(FROM, selected.tasks().get(1).schedulerFacts().createdAt());
+    }
+
+    @Test void preservesOnlyWhitelistedSourceFactsWithoutInventingExecutionOrFailureTime() throws Exception {
+        Instant created = FROM.plusSeconds(1), updated = TO.plusSeconds(120);
+        ObjectNode row = row("failed", "source-record", -1, created).put("task_type", "generate_video")
+                .put("error_code", "FAILED").put("updated_at", updated.toString());
+        row.putObject("payload").put("prompt", "raw-private-prompt").put("url", "https://private.invalid/raw");
+        row.put("prompt_id", "not-a-verified-prompt").put("instance_id", "not-a-verified-instance");
+        URI base = start(exchange -> reply(exchange, 200, response(1, 1, 1, List.of(row))));
+
+        var task = source(base, 1, 20).select(request(1)).tasks().getFirst();
+
+        assertEquals(new LogModels.SchedulerFacts("source-record", "generate_video", "FAILED", created, updated), task.schedulerFacts());
+        assertNull(task.failedAt()); assertNull(task.finalAttempt()); assertTrue(task.attempts().isEmpty());
+        assertEquals(AssociationScope.TASK_ONLY, task.associationScope());
+        ObjectNode stored = TaskSnapshot.schedulerFactsJson(task.schedulerFacts());
+        assertEquals(5, stored.size()); assertFalse(stored.toString().contains("raw-private-prompt"));
+        assertFalse(stored.toString().contains("private.invalid")); assertFalse(stored.toString().contains("not-a-verified"));
+    }
+
+    @Test void mergedTaskKeepsFactsFromNewestObservedSourceRecord() throws Exception {
+        URI base = start(exchange -> {
+            int page = page(exchange);
+            ObjectNode row = row("failed", page == 1 ? "old-record" : "latest-record", -1, FROM.plusSeconds(1))
+                    .put("task_type", page == 1 ? "old_type" : "new_type").put("error_code", page == 1 ? "FAILED" : "TIMEOUT")
+                    .put("updated_at", FROM.plusSeconds(page == 1 ? 2 : 20).toString());
+            reply(exchange, 200, response(page, 1, 2, List.of(row)));
+        });
+
+        var selection = source(base, 1, 20).select(request(1));
+
+        var facts = selection.tasks().getFirst().schedulerFacts();
+        assertEquals("latest-record", facts.recordId()); assertEquals("new_type", facts.taskType()); assertEquals("TIMEOUT", facts.errorCode());
+        assertEquals(FROM.plusSeconds(20), facts.updatedAt()); assertNull(selection.tasks().getFirst().failedAt());
+        assertTrue(selection.limitations().contains("SCHEDULER_TASK_RECORDS_MERGED"));
+    }
+
+    @Test void malformedOrConflictingSourceFactsCannotSilentlyBecomeSelectedMetadata() throws Exception {
+        ObjectNode malformed = row("bad", "bad-record", -1, FROM.plusSeconds(1)); malformed.putObject("task_type").put("private", "secret");
+        URI base = start(exchange -> reply(exchange, 200, response(1, 4, 4, List.of(malformed,
+                row("conflict", "c1", -1, FROM.plusSeconds(2)).put("error_code", "FAILED"),
+                row("conflict", "c2", -1, FROM.plusSeconds(2)).put("error_code", "TIMEOUT"),
+                row("good", "good-record", -1, FROM.plusSeconds(3)).putNull("task_type").putNull("error_code")))));
+
+        var selection = source(base, 4, 20).select(request(20));
+
+        assertEquals(List.of("good"), selection.tasks().stream().map(LogModels.Task::taskId).toList());
+        assertTrue(selection.limitations().containsAll(List.of("SCHEDULER_INVALID_TASK_RECORD", "SCHEDULER_TASK_STATE_CONFLICT", "TASK_SELECTION_INCOMPLETE")));
+        assertEquals("", selection.tasks().getFirst().schedulerFacts().taskType());
     }
 
     @Test void mergesLatestStateAcrossRecordsAndExcludesTaskThatLaterSucceeded() throws Exception {

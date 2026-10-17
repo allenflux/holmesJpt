@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import dev.holmes.Json;
 import dev.holmes.logs.LogModels.AssociationScope;
 import dev.holmes.logs.LogModels.Task;
+import dev.holmes.logs.LogModels.SchedulerFacts;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.net.URI;
@@ -192,7 +193,8 @@ public final class SchedulerTaskSource implements TaskSource {
                 if (!Set.of(-1, 0, 1, 2, 3).contains(status)) throw new IllegalArgumentException();
                 Instant created = time(task.path("created_at")), updated = time(task.path("updated_at"));
                 if (updated.isBefore(created)) throw new IllegalArgumentException();
-                rows.add(new Row(taskId, task.path("record_id").asText(), status, created, updated));
+                rows.add(new Row(taskId, task.path("record_id").asText(), status, created, updated,
+                        factCode(task.path("task_type")), factCode(task.path("error_code"))));
             } catch (RuntimeException e) {
                 if (LogRequest.validId(taskId)) blocked.add(taskId);
                 flags.add("SCHEDULER_INVALID_TASK_RECORD");
@@ -212,7 +214,13 @@ public final class SchedulerTaskSource implements TaskSource {
         return LocalDateTime.parse(text.replace(' ', 'T')).atZone(scheduler.timezone()).toInstant();
     }
 
-    private record Row(String taskId, String recordId, int status, Instant created, Instant updated) { }
+    private static String factCode(JsonNode value) {
+        if (value.isMissingNode() || value.isNull()) return "";
+        if (!value.isTextual() || value.asText().length() > 256 || value.asText().codePoints().anyMatch(Character::isISOControl)) throw new IllegalArgumentException();
+        return value.asText();
+    }
+
+    private record Row(String taskId, String recordId, int status, Instant created, Instant updated, String taskType, String errorCode) { }
     private record Page(int number, long total, Instant fetched, List<Row> rows, Set<String> blocked,
                         Set<String> flags, int rawRows, long bytes) { }
 
@@ -243,7 +251,8 @@ public final class SchedulerTaskSource implements TaskSource {
                 }
                 Row previous = newest.get(row.taskId);
                 if (previous == null || row.updated.isAfter(previous.updated)) newest.put(row.taskId, row);
-                else if (row.updated.equals(previous.updated) && (row.status != previous.status || !row.created.equals(previous.created))) {
+                else if (row.updated.equals(previous.updated) && (row.status != previous.status || !row.created.equals(previous.created)
+                        || !row.taskType.equals(previous.taskType) || !row.errorCode.equals(previous.errorCode))) {
                     blocked.add(row.taskId); incomplete("SCHEDULER_TASK_STATE_CONFLICT");
                 }
                 if (previous != null && !previous.recordId.equals(row.recordId)) flags.add("SCHEDULER_TASK_RECORDS_MERGED");
@@ -269,7 +278,8 @@ public final class SchedulerTaskSource implements TaskSource {
             if (selected.size() < request.requestedCount()) flags.add("FEWER_FAILED_TASKS_THAN_REQUESTED");
             List<Task> tasks = selected.stream().map(row -> new Task("task-" + TaskSnapshot.hex(request.source() + "\n"
                             + request.namespace() + "\n" + origin + "\n" + row.taskId).substring(0, 24), row.taskId, "failed", List.of(),
-                    "", "", null, row.updated + ":" + row.status, AssociationScope.TASK_ONLY)).toList();
+                    "", "", null, row.updated + ":" + row.status, AssociationScope.TASK_ONLY,
+                    new SchedulerFacts(row.recordId, row.taskType, row.errorCode, row.created, row.updated))).toList();
             return new TaskSnapshot.Selection(tasks, observed.toString(), List.copyOf(flags));
         }
     }

@@ -31,22 +31,27 @@ import java.util.regex.Pattern;
 
 /** 按权威任务快照关联证据并计数；模型输出不参与任务归属或失败簇计算。 */
 public final class LogAnalyzer {
-    public static final String RULE_VERSION = "holmes-log-v1.1";
+    public static final String RULE_VERSION = "holmes-log-v1.3";
     private static final JsonNodeFactory JSON = JsonNodeFactory.instance;
     private static final Duration CLOCK_MARGIN = Duration.ofMinutes(2);
     private static final int EXCERPT_LIMIT = 1_800;
     private static final int EVIDENCE_LIMIT = 8;
     private static final int TIMELINE_LIMIT = 20;
+    private static final int ERROR_SUMMARY_LIMIT = 800;
+    private static final Set<String> FAILURE_EVENTS = Set.of("execution_error", "execution_failed", "execution_failure", "task_failed", "task_failure");
+    private static final List<String> ORIGINAL_ERROR_FIELDS = List.of("exception_type", "exception_class", "error_type",
+            "exception_message", "error_message", "http_status", "http_status_code", "status_code", "error_code", "node_id", "node_type");
     private static final List<String> TASK_ONLY_FLAGS = List.of("TASK_ATTEMPT_UNVERIFIED",
             "PROMPT_ATTEMPT_MAPPING_UNVERIFIED", "EXECUTION_WINDOW_UNVERIFIED",
             "RETRY_MEMBERSHIP_UNVERIFIED", "TASK_FAILURE_FINALITY_UNVERIFIED");
     private static final Pattern PAYLOAD = Pattern.compile("(?i)\\bpayload\\s*[:=]\\s*");
     private static final Pattern EXCEPTION = Pattern.compile("\\b([A-Za-z_][A-Za-z0-9_.$]*(?:Error|Exception))\\b");
     private static final Pattern HTTP = Pattern.compile("(?i)(?:\\bHTTP(?:/\\d(?:\\.\\d)?)?\\s*(?:status(?:_code)?\\s*[:=]?\\s*)?|\\bstatus(?:_code)?\\s*[:=]\\s*|\\bresponse(?:\\s+code)?\\s*[:=]?\\s*)([45]\\d\\d)\\b");
+    private static final Pattern HTTP_CLIENT_SERVER_ERROR = Pattern.compile("(?i)\\b([45]\\d\\d)\\s+(?:Client|Server)\\s+Error\\b");
     private static final Pattern STACK_LINE = Pattern.compile("^(?:\\s+(?:at\\s|File\\s|raise\\s|\\^)|Traceback\\s|Caused by:|[A-Za-z_][A-Za-z0-9_.$]*(?:Error|Exception):).*");
     private static final Pattern URL_CREDENTIALS = Pattern.compile("(?i)(https?://)[^\\s/@\\\"'<>]+@");
     private static final Pattern BEARER = Pattern.compile("(?i)(\\b(?:Bearer|Basic)\\s+)[A-Za-z0-9._~+/-]+=*");
-    private static final String SECRET_NAMES = "(?:authorization|proxy[-_]?authorization|(?:access|refresh|auth)[_-]?token|x-auth-token|client[_-]?secret|api[_-]?key|x-api-key|token|password|passwd|secret|credential|private[_-]?key|cookie|set-cookie|signature|sig|x-amz-signature|x-amz-credential|x-amz-security-token|x-goog-signature|x-goog-credential)";
+    private static final String SECRET_NAMES = "(?:authorization|proxy[-_]?authorization|(?:access|refresh|auth)[_-]?token|x-auth-token|client[_-]?secret|api[\\t _-]?key|x-api-key|token|password|passwd|secret|credential|private[_-]?key|cookie|set-cookie|signature|sig|x-amz-signature|x-amz-credential|x-amz-security-token|x-goog-signature|x-goog-credential)";
     private static final Pattern SECRET = Pattern.compile("(?i)([\\\"']?" + SECRET_NAMES + "[\\\"']?\\s*[:=]\\s*)(?:\\\"(?:\\\\.|[^\\\"\\\\])*\\\"|'(?:\\\\.|[^'\\\\])*'|[^\\s,;}&\\\"'#]+)");
     // Cookie 头的整行都是凭据；限定为独立头，避免吞掉 URL 后面的 task_id 参数。
     private static final Pattern COOKIE_HEADER = Pattern.compile("(?im)((?<!\\S)(?:set-cookie|cookie)\\s*[:=][\\t ]*+)(?![\\\"'])[^\\r\\n]+");
@@ -85,8 +90,9 @@ public final class LogAnalyzer {
             if (task.associationScope() == AssociationScope.TASK_ONLY) state.flags.addAll(TASK_ONLY_FLAGS);
         }
 
+        Map<String, Set<TaskState>> aliasConflicts = sourceAliasConflicts(tasks, states.values());
         List<ParsedEvent> parsed = normalize(events, quality);
-        for (ParsedEvent event : parsed) associate(event, states.values(), namespace, quality);
+        for (ParsedEvent event : parsed) associate(event, states.values(), aliasConflicts, namespace, quality);
         appendMultiline(parsed);
         for (ParsedEvent event : parsed) {
             if (event.owner == null || event.multilineChild) continue;
@@ -128,7 +134,39 @@ public final class LogAnalyzer {
     private static boolean sameTask(Task left, Task right) {
         return java.util.Objects.equals(left.finalAttemptId(), right.finalAttemptId())
                 && left.attempts().equals(right.attempts()) && java.util.Objects.equals(left.statusVersion(), right.statusVersion())
-                && left.associationScope() == right.associationScope();
+                && left.associationScope() == right.associationScope() && java.util.Objects.equals(left.schedulerFacts(), right.schedulerFacts());
+    }
+
+    /** 仅源事实中校验通过的记录ID可作为候选别名，不从任意 uuid 标签或日志正文推断映射。 */
+    private static String sourceRecordId(Task task) {
+        String id = task.schedulerFacts() == null ? "" : task.schedulerFacts().recordId();
+        return LogRequest.validId(id) ? id : "";
+    }
+
+    private static boolean taskIdentity(Task task, String id) {
+        return id.equals(task.taskId()) || task.associationScope() == AssociationScope.TASK_ONLY && id.equals(sourceRecordId(task));
+    }
+
+    private static Map<String, Set<TaskState>> sourceAliasConflicts(List<Task> tasks, Collection<TaskState> states) {
+        Map<String, Set<String>> owners = new LinkedHashMap<>(); Set<String> aliases = new LinkedHashSet<>();
+        // 冲突检测覆盖原始输入，不能让已去重或拒绝的任务藏掉它声明过的源记录别名。
+        for (Task task : tasks) {
+            owners.computeIfAbsent(task.taskId(), ignored -> new LinkedHashSet<>()).add(task.taskId());
+            String record = sourceRecordId(task);
+            if (!record.isEmpty()) {
+                owners.computeIfAbsent(record, ignored -> new LinkedHashSet<>()).add(task.taskId());
+                if (task.associationScope() == AssociationScope.TASK_ONLY) aliases.add(record);
+            }
+            if (task.associationScope() == AssociationScope.VERIFIED_ATTEMPTS) for (Attempt attempt : task.attempts())
+                if (attempt.promptId() != null && !attempt.promptId().isBlank()) owners.computeIfAbsent(attempt.promptId(), ignored -> new LinkedHashSet<>()).add(task.taskId());
+        }
+        Map<String, Set<TaskState>> conflicts = new LinkedHashMap<>();
+        for (String alias : aliases) if (owners.get(alias).size() > 1) {
+            Set<TaskState> mentioned = new LinkedHashSet<>();
+            for (TaskState state : states) if (owners.get(alias).contains(state.task.taskId())) mentioned.add(state);
+            conflicts.put(alias, mentioned);
+        }
+        return conflicts;
     }
 
     private static List<ParsedEvent> normalize(List<LogEvent> events, Set<String> quality) {
@@ -264,32 +302,37 @@ public final class LogAnalyzer {
         return null;
     }
 
-    private static void associate(ParsedEvent event, Collection<TaskState> states, String namespace, Set<String> quality) {
+    private static void associate(ParsedEvent event, Collection<TaskState> states, Map<String, Set<TaskState>> aliasConflicts, String namespace, Set<String> quality) {
         if (event.taskIds.isEmpty() && event.promptIds.isEmpty()) return;
         Set<TaskState> mentioned = new LinkedHashSet<>();
         Set<TaskState> candidates = null;
         boolean unknownId = false;
         TaskState explicitTaskOnly = null;
+        // 已知别名属于多个任务时不能用其他字段消歧，避免把一个任务的证据归到另一个任务。
+        for (String id : java.util.stream.Stream.concat(event.taskIds.stream(), event.promptIds.stream()).toList()) {
+            Set<TaskState> conflict = aliasConflicts.get(id);
+            if (conflict != null) { mentioned.addAll(conflict); unknownId = true; }
+        }
         if (event.taskIds.size() == 1) {
             String explicitId = event.taskIds.iterator().next();
-            for (TaskState state : states) if (state.task.associationScope() == AssociationScope.TASK_ONLY
-                    && explicitId.equals(state.task.taskId())) explicitTaskOnly = state;
+            List<TaskState> matches = states.stream().filter(state -> taskIdentity(state.task, explicitId)).toList();
+            if (matches.size() == 1 && matches.getFirst().task.associationScope() == AssociationScope.TASK_ONLY) explicitTaskOnly = matches.getFirst();
         }
         for (String taskId : event.taskIds) {
             Set<TaskState> matches = new LinkedHashSet<>();
-            for (TaskState state : states) if (taskId.equals(state.task.taskId())) matches.add(state);
+            for (TaskState state : states) if (taskIdentity(state.task, taskId)) matches.add(state);
             mentioned.addAll(matches);
             if (matches.isEmpty()) unknownId = true;
             candidates = intersect(candidates, matches);
         }
         for (String promptId : event.promptIds) {
             Set<TaskState> matches = new LinkedHashSet<>();
-            for (TaskState state : states) if (promptId.equals(state.task.taskId())
+            for (TaskState state : states) if (taskIdentity(state.task, promptId)
                     || state.task.associationScope() == AssociationScope.VERIFIED_ATTEMPTS
                     && state.task.attempts().stream().anyMatch(attempt -> promptId.equals(attempt.promptId()))) matches.add(state);
             mentioned.addAll(matches);
             if (matches.isEmpty() && explicitTaskOnly != null) {
-                // 精确逻辑 task_id 已成立；未知 prompt 只能作为观察元数据，不能建立重试映射。
+                // 精确逻辑ID或源记录别名已成立；未知 prompt 只作观察元数据，不建立重试映射。
                 event.flags.add("UNVERIFIED_PROMPT_ID");
                 continue;
             }
@@ -327,10 +370,12 @@ public final class LogAnalyzer {
         if (event.attemptIds.size() > 1) { owner.flags.add("AMBIGUOUS_ATTEMPT"); return; }
         if (owner.task.associationScope() == AssociationScope.TASK_ONLY) {
             if (event.instances.size() > 1) { owner.flags.add("AMBIGUOUS_INSTANCE"); return; }
-            // 只保留精确逻辑任务 ID 的候选证据。已观察到的 attempt/instance 不能冒充已验证映射。
+            // 源记录别名只用于候选关联；已观察到的 attempt/instance 仍不能冒充已验证映射。
             event.owner = owner;
             event.attempt = null;
-            event.basis = "TASK_ID_ONLY_ATTEMPT_UNVERIFIED";
+            String alias = sourceRecordId(owner.task);
+            event.basis = !alias.isEmpty() && !alias.equals(owner.task.taskId()) && (event.taskIds.contains(alias) || event.promptIds.contains(alias))
+                    ? "SOURCE_RECORD_TASK_ID_ATTEMPT_UNVERIFIED" : "TASK_ID_ONLY_ATTEMPT_UNVERIFIED";
             event.flags.addAll(TASK_ONLY_FLAGS);
             markStreamQuality(event, namespaces);
             return;
@@ -418,6 +463,8 @@ public final class LogAnalyzer {
             String value = classify(event);
             if (value != null) signatures.add(value);
         }
+        // 泛化报错只说明失败事件存在，不能与同次执行的具体异常一起制造签名冲突。
+        if (signatures.size() > 1) signatures.remove("EXECUTION_ERROR");
         String reason = classifyText(state.task.failureReason(), "scheduler", List.of(), state.task, true);
         if (!state.complete || state.flags.contains("INCOMPLETE_ATTEMPT_WINDOW")) {
             // 部分日志不能支持确定的共同原因；权威终态原因仍可报告为失败签名。
@@ -427,6 +474,10 @@ public final class LogAnalyzer {
         if (signatures.size() > 1) { state.flags.add("MULTIPLE_FAILURE_SIGNATURES"); return "AMBIGUOUS"; }
         if (signatures.size() == 1) {
             String value = signatures.iterator().next();
+            if (value.equals("EXECUTION_ERROR") && reason != null) {
+                state.flags.add("SIGNATURE_FROM_TASK_FAILURE_REASON");
+                return reason;
+            }
             if (reason != null && !compatibleReason(reason, value)) { state.flags.add("CONFLICTING_FAILURE_REASON"); return "AMBIGUOUS"; }
             return value;
         }
@@ -453,22 +504,11 @@ public final class LogAnalyzer {
     }
 
     private static String computeSignature(ParsedEvent event) {
-        List<JsonNode> details = new ArrayList<>(event.errorScopes);
-        for (JsonNode scope : event.errorScopes) {
-            if (scope.path("error").isObject()) details.add(scope.path("error"));
-            if (scope.path("exception").isObject()) details.add(scope.path("exception"));
-        }
-        String exception = field(details, "exception_type", "exception_class", "error_type");
-        if (exception.isBlank()) for (JsonNode scope : event.errorScopes) {
-            for (String nested : List.of("error", "exception")) if (scope.path(nested).isObject()) {
-                exception = field(List.of(scope.path(nested)), "type", "class", "name");
-                if (!exception.isBlank()) break;
-            }
-            if (!exception.isBlank()) break;
-        }
+        List<JsonNode> details = failureDetails(event);
+        String exception = exceptionType(event, details);
         String code = field(details, "http_status", "http_status_code", "status_code", "error_code");
         String errorMessage = field(details, "exception_message", "error_message", "error", "reason");
-        // original_data 只提供关联 ID；工作流、用户 prompt 和 metrics 不能伪造异常。
+        // original_data 只有明确失败事件的异常白名单可进入语义；工作流、prompt、metrics 不参与分类。
         StringBuilder semantic = new StringBuilder();
         if (event.scopes.isEmpty()) semantic.append(event.text);
         else for (JsonNode scope : details) for (String name : List.of("message", "exception_message", "error_message", "error", "reason", "failure_reason", "stack_trace", "traceback", "exception")) {
@@ -481,6 +521,7 @@ public final class LogAnalyzer {
         }
         String fatalText = semantic + "\n" + exception + "\n" + errorMessage + event.continuationText;
         boolean fatal = !exception.isBlank() || !errorMessage.isBlank() || !code.isBlank()
+                || explicitFailure(event)
                 || event.level.matches("(?i)error|fatal|critical")
                 || event.eventName.matches("(?i).*(?:execution_error|task_failed|task_failure|execution_failed|exception|oom|timeout).*")
                 || EXCEPTION.matcher(fatalText).find()
@@ -489,7 +530,98 @@ public final class LogAnalyzer {
         String known = classifyText(fatalText, event.component, details, event.owner.task, false);
         if (known != null && !known.startsWith("EXCEPTION:")) return known;
         if (!exception.isBlank()) return fingerprint(exception, code, firstNonempty(errorMessage, semantic.toString()), event.component, event.owner.task);
-        return known;
+        return known != null ? known : explicitFailure(event) ? "EXECUTION_ERROR" : null;
+    }
+
+    private static boolean explicitFailure(ParsedEvent event) {
+        return FAILURE_EVENTS.contains(event.eventName.strip().toLowerCase(Locale.ROOT));
+    }
+
+    private static List<JsonNode> failureDetails(ParsedEvent event) {
+        List<JsonNode> details = new ArrayList<>(event.errorScopes);
+        for (JsonNode scope : event.errorScopes) {
+            if (scope.path("error").isObject()) details.add(scope.path("error"));
+            if (scope.path("exception").isObject()) details.add(scope.path("exception"));
+            // 仅外层已确认的精确失败事件可读取 Comfy 异常字段，内部 event 不能自行开启此路径。
+            JsonNode original = scope.path("original_data");
+            if (!explicitFailure(event) || !original.isObject()) continue;
+            ObjectNode allowed = JSON.objectNode();
+            for (String name : ORIGINAL_ERROR_FIELDS) {
+                JsonNode value = original.get(name);
+                if (value != null && (value.isTextual() || value.isNumber())) allowed.set(name, value);
+            }
+            JsonNode traceback = original.path("traceback");
+            if (traceback.isTextual()) allowed.put("traceback", excerpt(traceback.asText(), 4_000));
+            else if (traceback.isArray()) {
+                StringBuilder text = new StringBuilder();
+                for (int i = 0; i < Math.min(traceback.size(), 32) && text.length() < 4_000; i++) {
+                    if (!traceback.get(i).isTextual()) continue;
+                    int available = 4_000 - text.length() - (text.isEmpty() ? 0 : 1);
+                    if (available < 2) break;
+                    if (!text.isEmpty()) text.append('\n');
+                    text.append(excerpt(traceback.get(i).asText(), available));
+                }
+                if (!text.isEmpty()) allowed.put("traceback", text.toString());
+            }
+            if (!allowed.isEmpty()) details.add(allowed);
+        }
+        return details;
+    }
+
+    private static String exceptionType(ParsedEvent event, List<JsonNode> details) {
+        String exception = field(details, "exception_type", "exception_class", "error_type");
+        if (!exception.isBlank()) return exception;
+        for (JsonNode scope : event.errorScopes) for (String nested : List.of("error", "exception")) {
+            if (!scope.path(nested).isObject()) continue;
+            exception = field(List.of(scope.path(nested)), "type", "class", "name");
+            if (!exception.isBlank()) return exception;
+        }
+        return "";
+    }
+
+    private static String exceptionMessage(ParsedEvent event, List<JsonNode> details) {
+        String message = field(details, "exception_message", "error_message", "error", "reason", "failure_reason");
+        if (!message.isBlank()) return message;
+        for (JsonNode scope : event.errorScopes) for (String nested : List.of("error", "exception")) {
+            if (scope.path(nested).isObject()) {
+                message = field(List.of(scope.path(nested)), "message");
+                if (!message.isBlank()) return message;
+            }
+        }
+        return "";
+    }
+
+    private static String errorSummary(ParsedEvent event) {
+        String signature = classify(event);
+        if (signature == null) return "";
+        List<JsonNode> details = failureDetails(event);
+        List<String> parts = new ArrayList<>();
+        if (!event.eventName.isBlank()) parts.add(safeMeta(event.eventName));
+        parts.add(signature);
+        String exception = exceptionType(event, details), message = exceptionMessage(event, details);
+        if (!exception.isBlank()) parts.add("exception_type=" + safeMeta(exception));
+        for (String name : List.of("node_id", "node_type")) {
+            String value = field(details, name);
+            if (!value.isBlank()) parts.add(name + "=" + excerpt(redact(value), 128));
+        }
+        if (!message.isBlank()) parts.add("message=" + excerpt(redact(message), 600));
+        else if (signature.equals("EXECUTION_ERROR") && exception.isBlank()) parts.add("exception details unavailable");
+        return excerpt(redact(String.join("; ", parts)), ERROR_SUMMARY_LIMIT);
+    }
+
+    private static void putErrorEvidence(ObjectNode node, ParsedEvent event) {
+        node.put("event", safeMeta(event.eventName));
+        String signature = classify(event);
+        if (signature == null) { node.putNull("failure_signature"); return; }
+        node.put("failure_signature", signature).put("error_summary", errorSummary(event));
+        List<JsonNode> details = failureDetails(event);
+        String exception = exceptionType(event, details), message = exceptionMessage(event, details);
+        if (!exception.isBlank()) node.put("exception_type", safeMeta(exception));
+        if (!message.isBlank()) node.put("exception_message", excerpt(redact(message), 600));
+        for (String name : List.of("node_id", "node_type")) {
+            String value = field(details, name);
+            if (!value.isBlank()) node.put(name, excerpt(redact(value), 128));
+        }
     }
 
     private static String classifyText(String value, String component, List<JsonNode> details, Task task, boolean authoritativeReason) {
@@ -505,6 +637,8 @@ public final class LogAnalyzer {
         if (code.matches("[45]\\d\\d")) return "HTTP_" + code;
         Matcher http = HTTP.matcher(value);
         if (http.find()) return "HTTP_" + http.group(1);
+        Matcher clientServerError = HTTP_CLIENT_SERVER_ERROR.matcher(value);
+        if (clientServerError.find()) return "HTTP_" + clientServerError.group(1);
         if (authoritativeReason && value.matches("(?i)HTTP_[45]\\d\\d")) return value.toUpperCase(Locale.ROOT);
         Matcher exception = EXCEPTION.matcher(value);
         if (exception.find()) {
@@ -523,7 +657,10 @@ public final class LogAnalyzer {
                 .replaceAll("(?i)(?:/tmp|/var/tmp)/[^\\s\\\"']+", "<temp>")
                 .replaceAll("\\b\\d+(?:\\.\\d+)?\\b", "<n>").replaceAll("\\s+", " ").strip();
         normalized = excerpt(normalized, 800);
-        String safeException = exception.replaceAll("[^A-Za-z0-9_.$]", "");
+        // 类名不是任意错误文本；删除符号会破坏 token= 等脱敏标记并把凭据拼入签名。
+        String safeException = exception.length() <= 256
+                && exception.matches("[A-Za-z_$][A-Za-z0-9_$]*(?:\\.[A-Za-z_$][A-Za-z0-9_$]*)*")
+                ? exception : "UnrecognizedException";
         return "EXCEPTION:" + safeException + ":" + sha256(component + "|" + exception + "|" + code + "|" + normalized).substring(0, 16);
     }
 
@@ -576,6 +713,7 @@ public final class LogAnalyzer {
             detail.put("excerpt", saved);
             detail.put("content_sha256", digest);
             detail.put("association_basis", event.basis);
+            putErrorEvidence(detail, event);
             strings(detail.putArray("quality_flags"), event.flags);
         }
         if (state.events.size() > EVIDENCE_LIMIT) state.flags.add("REPRESENTATIVE_EVIDENCE_LIMIT");
@@ -593,7 +731,7 @@ public final class LogAnalyzer {
             item.put("component", safeMeta(event.component));
             item.put("pod", safeMeta(event.pod));
             item.put("container", safeMeta(event.container));
-            item.put("event", safeMeta(event.eventName));
+            putErrorEvidence(item, event);
             item.put("association_basis", event.basis);
             item.put("context_only", false);
             item.put("excerpt", excerpt(redact(evidenceText(event)), 600));
@@ -611,6 +749,7 @@ public final class LogAnalyzer {
             node.putNull("attempt_id");
             node.putNull("historical_attempt");
             node.put("candidate_only", true);
+            if (!event.taskIds.isEmpty()) node.put("observed_task_id", safeMeta(event.taskIds.iterator().next()));
             if (!event.promptIds.isEmpty()) node.put("observed_prompt_id", safeMeta(event.promptIds.iterator().next()));
             if (!event.attemptIds.isEmpty()) node.put("observed_attempt_id", safeMeta(event.attemptIds.iterator().next()));
             if (!event.instances.isEmpty()) node.put("observed_instance_id", safeMeta(event.instances.iterator().next()));
@@ -622,7 +761,9 @@ public final class LogAnalyzer {
     }
 
     private static String evidenceText(ParsedEvent event) {
-        return event.text + (event.structuredFields.isBlank() ? "" : "\nstructured_fields: " + event.structuredFields);
+        String summary = errorSummary(event);
+        return (summary.isBlank() ? "" : "error_summary: " + summary + "\n")
+                + event.text + (event.structuredFields.isBlank() ? "" : "\nstructured_fields: " + event.structuredFields);
     }
 
     /** 归档组件也可复用同一脱敏规则；哈希必须针对脱敏后的实际内容计算。 */

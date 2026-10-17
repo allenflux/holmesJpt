@@ -19,6 +19,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Flow;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicLong;
 
 /** 用 JDK HTTP 客户端直接调用兼容 OpenAI 的 Chat Completions 接口。 */
 public final class OpenAiClient implements LlmClient {
@@ -47,14 +48,19 @@ public final class OpenAiClient implements LlmClient {
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(body.toString(), StandardCharsets.UTF_8)).build();
         for (int attempt = 0; attempt < 3; attempt++) {
+            long started = System.nanoTime(), timeoutNanos = config.llmTimeout().toNanos();
             var pending = http.sendAsync(request, info -> new LimitedBody());
+            AtomicLong completedAfter = new AtomicLong(-1);
+            // 先记录真实完成时刻再唤醒等待方，避免线程晚醒把早已发生的网络错误误判为超时。
+            var observed = pending.whenComplete((response, failure) -> completedAfter.set(System.nanoTime() - started));
             HttpResponse<byte[]> response;
-            try { response = pending.get(config.llmTimeout().toMillis(), TimeUnit.MILLISECONDS); }
+            try { response = observed.get(Math.max(1, timeoutNanos - (System.nanoTime() - started)), TimeUnit.NANOSECONDS); }
             catch (TimeoutException e) {
                 pending.cancel(true);
-                throw new IOException("LLM 请求超时（包含响应体读取）");
+                throw new LlmRequestFailure(LlmRequestFailure.Kind.TIMEOUT);
             } catch (ExecutionException e) {
-                throw new IOException("LLM 网络请求失败或响应超过 2 MiB 限制");
+                // 只辨认可控的本地异常类型，不读取供应商正文或任意异常消息。
+                throw requestFailure(e.getCause(), completedAfter.get(), timeoutNanos);
             } catch (InterruptedException e) {
                 pending.cancel(true);
                 throw e;
@@ -67,25 +73,36 @@ public final class OpenAiClient implements LlmClient {
                 continue;
             }
             if (status < 200 || status >= 300) {
-                throw new IOException("LLM HTTP " + status + "；请检查地址、密钥、模型或供应商限流状态");
+                throw new LlmRequestFailure(LlmRequestFailure.Kind.HTTP, status);
             }
-            if (bytes.length > MAX_RESPONSE_BYTES) throw new IOException("LLM 响应超过 2 MiB 限制");
+            if (bytes.length > MAX_RESPONSE_BYTES) throw new LlmRequestFailure(LlmRequestFailure.Kind.RESPONSE_LIMIT);
             JsonNode choice;
             try {
                 JsonNode decoded = Json.MAPPER.readTree(bytes);
                 if (decoded == null || !decoded.isObject()) throw new IOException("响应不是 JSON 对象");
                 choice = decoded.path("choices").path(0);
             }
-            catch (IOException e) { throw new IOException("LLM 返回了无效的 JSON"); }
+            catch (IOException e) { throw new LlmRequestFailure(LlmRequestFailure.Kind.INVALID_RESPONSE); }
             if (!(choice.path("message") instanceof ObjectNode message)) {
-                throw new IOException("LLM 响应缺少 choices[0].message");
+                throw new LlmRequestFailure(LlmRequestFailure.Kind.INVALID_RESPONSE);
             }
             if (!"assistant".equals(message.path("role").asText())) {
-                throw new IOException("LLM 返回了非法的消息角色");
+                throw new LlmRequestFailure(LlmRequestFailure.Kind.INVALID_RESPONSE);
             }
             return new Reply(message.deepCopy(), choice.path("finish_reason").asText("stop"));
         }
-        throw new IOException("LLM 暂时不可用");
+        throw new LlmRequestFailure(LlmRequestFailure.Kind.NETWORK);
+    }
+
+    /** 异步异常可以被多层包装；只检查类型和明确截止时间，不解析消息或保存异常链。 */
+    static LlmRequestFailure requestFailure(Throwable cause, long completedAfter, long timeoutNanos) {
+        boolean timeout = false;
+        for (int depth = 0; cause != null && depth < 16; depth++, cause = cause.getCause()) {
+            if (cause instanceof LlmRequestFailure failure) return new LlmRequestFailure(failure.kind(), failure.httpStatus());
+            if (cause instanceof java.net.http.HttpTimeoutException || cause instanceof java.net.SocketTimeoutException || cause instanceof TimeoutException)
+                timeout = true;
+        }
+        return new LlmRequestFailure(timeout || completedAfter >= timeoutNanos ? LlmRequestFailure.Kind.TIMEOUT : LlmRequestFailure.Kind.NETWORK);
     }
 
     /** 边接收边限制内存，并让总超时覆盖响应体，而不只等待响应头。 */
@@ -102,7 +119,7 @@ public final class OpenAiClient implements LlmClient {
             for (ByteBuffer buffer : buffers) {
                 if ((long) bytes.size() + buffer.remaining() > MAX_RESPONSE_BYTES) {
                     subscription.cancel();
-                    result.completeExceptionally(new IOException("LLM 响应超过 2 MiB 限制"));
+                    result.completeExceptionally(new LlmRequestFailure(LlmRequestFailure.Kind.RESPONSE_LIMIT));
                     return;
                 }
                 byte[] chunk = new byte[buffer.remaining()];

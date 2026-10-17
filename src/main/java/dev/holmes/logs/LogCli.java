@@ -33,9 +33,10 @@ public final class LogCli {
         }
         if (port < 0 || port > 65535) throw new IllegalArgumentException("端口必须介于 0 与 65535");
         LogConfig config = LogConfig.from(env);
+        LogNarrativeGenerator narrative = LogNarratives.from(env, false);
         if (args[0].equals("serve")) {
             if (requestFile != null || output != null) throw new IllegalArgumentException("logs serve 不接受 --request / --output");
-            LogInvestigationService service = new LogInvestigationService(config, TaskSource.from(config, env));
+            LogInvestigationService service = new LogInvestigationService(config, TaskSource.from(config, env), narrative);
             try {
                 var server = new HttpApi(null, service).start(port);
                 Runtime.getRuntime().addShutdownHook(new Thread(() -> { server.stop(1); service.close(); }));
@@ -50,7 +51,7 @@ public final class LogCli {
             if (bytes.length > 65536) throw new IllegalArgumentException("请求文件超过 64 KiB");
             request = Json.MAPPER.readTree(bytes);
         } catch (com.fasterxml.jackson.core.JacksonException e) { throw new IllegalArgumentException("请求文件必须是有效 JSON"); }
-        try (LogInvestigationService service = new LogInvestigationService(config, TaskSource.from(config, env))) {
+        try (LogInvestigationService service = new LogInvestigationService(config, TaskSource.from(config, env), narrative)) {
             var accepted = service.submit(request);
             var result = service.await(accepted.path("batch_id").asText());
             String json = Json.MAPPER.writerWithDefaultPrettyPrinter().writeValueAsString(result);
@@ -61,12 +62,13 @@ public final class LogCli {
 
     private static void help() {
         System.out.println("""
-                Holmes Log 首版（无需 LLM_API_KEY）
+                Holmes Log（规则采集无需 LLM_API_KEY，可选模型解释需要 Key）
                 logs analyze --request 请求.json [--tasks 状态快照.json] [--output 报告.json]
                 logs serve [--tasks 状态快照.json] [--port 8080]
                 默认自动从 HOLMES_SCHEDULER_URL 获取任务；--tasks 切换为明确的文件快照。
                 离线样本同时指定 --tasks examples/logs/tasks.json --log-file examples/logs/events.jsonl
                 数据源与归档配置使用 HOLMES_GRAFANA_* / HOLMES_FLUXDROP_* 环境变量。
+                请求 JSON 指定 narrative:llm 才调用模型解释，缺省 none；零证据时跳过调用。
                 --data-dir 指定有容量上限和 TTL 的检查点目录；大日志只在显式 required 模式归档。
                 """);
     }

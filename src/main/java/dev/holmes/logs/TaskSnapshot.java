@@ -1,9 +1,12 @@
 package dev.holmes.logs;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import dev.holmes.Json;
 import dev.holmes.logs.LogModels.Attempt;
 import dev.holmes.logs.LogModels.Task;
+import dev.holmes.logs.LogModels.AssociationScope;
+import dev.holmes.logs.LogModels.SchedulerFacts;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -13,6 +16,7 @@ import java.util.Comparator;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 
 /** 以明确的任务状态快照启动首版；不将 ERROR 候选事件冒充最终失败状态。 */
 public final class TaskSnapshot {
@@ -67,7 +71,8 @@ public final class TaskSnapshot {
             if (status.equals("failed") && !attempts.isEmpty() && !attemptIds.contains(finalId)) throw new Unprocessable("请明确 final_attempt_id");
             String ref = "task-" + hex(request.source() + "\n" + request.namespace() + "\n" + scheduler + "\n" + id).substring(0, 24);
             all.add(new Task(ref, id, status, attempts, finalId, LogRequest.text(item, "failure_reason", ""), failed,
-                    LogRequest.text(item, "status_version", "snapshot")));
+                    LogRequest.text(item, "status_version", "snapshot"), AssociationScope.VERIFIED_ATTEMPTS,
+                    schedulerFactsFromJson(item.path("scheduler_facts"))));
         }
         List<Task> selected;
         java.util.Map<String, String> aliases = new java.util.HashMap<>();
@@ -97,6 +102,41 @@ public final class TaskSnapshot {
         limitations.add("TASK_STATUS_FROM_SNAPSHOT");
         if (selected.size() < request.requestedCount()) limitations.add("FEWER_FAILED_TASKS_THAN_REQUESTED");
         return new Selection(selected, observed.toString(), limitations);
+    }
+
+    /** 源事实独立序列化，不能填入 failed_at、attempts 或任何已验证执行字段。 */
+    public static ObjectNode schedulerFactsJson(SchedulerFacts facts) {
+        if (facts == null) return null;
+        ObjectNode result = Json.MAPPER.createObjectNode().put("record_id", facts.recordId()).put("task_type", facts.taskType()).put("error_code", facts.errorCode());
+        if (facts.createdAt() == null) result.putNull("created_at"); else result.put("created_at", facts.createdAt().toString());
+        if (facts.updatedAt() == null) result.putNull("updated_at"); else result.put("updated_at", facts.updatedAt().toString());
+        return result;
+    }
+
+    /** 旧快照和报告没有 scheduler_facts 时返回 null，不推断或补造源记录。 */
+    public static SchedulerFacts schedulerFactsFromJson(JsonNode value) {
+        if (value == null || value.isMissingNode() || value.isNull()) return null;
+        if (!value.isObject()) throw new Unprocessable("scheduler_facts 必须是对象");
+        Set<String> fields = Set.of("record_id", "task_type", "error_code", "created_at", "updated_at");
+        var names = value.fieldNames(); while (names.hasNext()) if (!fields.contains(names.next())) throw new Unprocessable("scheduler_facts 含非白名单字段");
+        String record = factCode(value.path("record_id")), type = factCode(value.path("task_type")), error = factCode(value.path("error_code"));
+        if (!record.isEmpty() && !LogRequest.validId(record)) throw new Unprocessable("scheduler_facts 记录ID无效");
+        Instant created = factTime(value.path("created_at")), updated = factTime(value.path("updated_at"));
+        if (created != null && updated != null && updated.isBefore(created)) throw new Unprocessable("scheduler_facts 时间顺序无效");
+        return new SchedulerFacts(record, type, error, created, updated);
+    }
+
+    private static String factCode(JsonNode value) {
+        if (value.isMissingNode() || value.isNull()) return "";
+        if (!value.isTextual() || value.asText().length() > 256 || value.asText().codePoints().anyMatch(Character::isISOControl)) throw new Unprocessable("scheduler_facts 编码字段无效");
+        return value.asText();
+    }
+
+    private static Instant factTime(JsonNode value) {
+        if (value.isMissingNode() || value.isNull()) return null;
+        if (!value.isTextual()) throw new Unprocessable("scheduler_facts 时间字段无效");
+        try { return Instant.parse(value.asText()); }
+        catch (java.time.DateTimeException exception) { throw new Unprocessable("scheduler_facts 时间字段无效"); }
     }
 
     static String hex(String text) {

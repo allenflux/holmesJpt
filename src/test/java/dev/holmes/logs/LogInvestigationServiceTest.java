@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.sun.net.httpserver.HttpServer;
 import dev.holmes.Json;
+import dev.holmes.LlmClient;
 import dev.holmes.logs.LogModels.FetchResult;
 import dev.holmes.logs.LogModels.LogEvent;
 import java.io.IOException;
@@ -21,6 +22,7 @@ import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -70,6 +72,181 @@ class LogInvestigationServiceTest {
         assertTrue(report.path("limitations").toString().contains("FEWER_FAILED_TASKS_THAN_REQUESTED"));
     }
 
+    @Test void automaticUsesFreshServerWindowAndOnlyConfiguredSourceAndNamespaces() throws Exception {
+        for (String namespaces : List.of("zulu,alpha", "zulu,prod,alpha")) {
+            var config = fixtureConfig(directory.resolve(namespaces.contains("prod") ? "prod" : "alpha"), Map.of(
+                    "HOLMES_LOG_TASKS_FILE", "", "HOLMES_LOG_NAMESPACES", namespaces, "HOLMES_LOG_SOURCE", "synthetic-readonly"));
+            AtomicReference<LogRequest> selected = new AtomicReference<>();
+            AtomicInteger logCalls = new AtomicInteger();
+            var service = start(config, (query, maxEvents, maxBytes, deadline) -> {
+                logCalls.incrementAndGet(); return new FetchResult(List.of(), true, List.of(), 0);
+            }, request -> {
+                selected.set(request); return new TaskSnapshot.Selection(List.of(), Instant.now().toString(), List.of());
+            }, null);
+            Instant before = Instant.now().truncatedTo(java.time.temporal.ChronoUnit.MILLIS);
+            ObjectNode accepted = service.submitAutomatic();
+            Instant after = Instant.now();
+            var report = completed(service, accepted);
+            LogRequest actual = selected.get();
+
+            assertFalse(actual.to().isBefore(before));
+            assertFalse(actual.to().isAfter(after));
+            assertEquals(0, actual.to().getNano() % 1_000_000);
+            assertEquals(Duration.ofHours(24), Duration.between(actual.from(), actual.to()));
+            assertEquals("synthetic-readonly", actual.source());
+            assertEquals(namespaces.contains("prod") ? "prod" : "alpha", actual.namespace());
+            assertEquals("latest_failed", actual.mode());
+            assertEquals(50, actual.requestedCount());
+            assertTrue(actual.taskIds().isEmpty());
+            assertFalse(actual.archiveRequired());
+            assertEquals("none", actual.narrative());
+            assertEquals("final_failed", report.path("request").path("attempt_scope").asText());
+            assertEquals("none", report.path("request").path("raw_archive").asText());
+            assertEquals("NOT_REQUESTED", report.path("narrative_status").asText());
+            assertEquals(0, logCalls.get());
+            JsonNode saved = Json.MAPPER.readTree(Files.readAllBytes(config.dataDir().resolve("reports")
+                    .resolve(accepted.path("batch_id").asText() + ".json")));
+            assertEquals(report.path("request"), saved.path("request"));
+        }
+    }
+
+    @Test void automaticSnapshotUsesObservationUpperBoundAndPreservesExistingRuleEvidence() throws Exception {
+        var config = fixtureConfig(directory, Map.of());
+        ObjectNode snapshot = (ObjectNode) Json.MAPPER.readTree(Files.readAllBytes(config.tasksFile()));
+        Instant observed = Instant.parse(snapshot.path("observed_at").asText());
+        ObjectNode atBoundary = ((ObjectNode) snapshot.path("tasks").get(1)).deepCopy();
+        atBoundary.put("failed_at", observed.toString());
+        snapshot.putArray("tasks").add(atBoundary);
+        Files.writeString(config.tasksFile(), snapshot.toString());
+        var service = start(config, new FileLogSource(config.logsFile()));
+
+        var automatic = completed(service, service.submitAutomatic());
+        LogRequest actual = LogRequest.parse(automatic.path("request"), config);
+        var manual = completed(service, service.submit(automatic.path("request")));
+
+        assertEquals(observed.plusMillis(1), actual.to());
+        assertEquals(Duration.ofHours(24), Duration.between(actual.from(), actual.to()));
+        assertEquals(50, automatic.path("requested_count").asInt());
+        assertEquals(1, automatic.path("selected_count").asInt());
+        assertEquals("task-B", automatic.path("tasks").get(0).path("task_id").asText());
+        assertEquals("CUDA_OOM", automatic.path("tasks").get(0).path("signature").asText());
+        for (String field : List.of("tasks", "evidence", "clusters", "engineer_view", "observed_error_event_count", "retrieved_event_count"))
+            assertEquals(manual.path(field), automatic.path(field), field);
+        assertEquals("NOT_REQUESTED", automatic.path("narrative_status").asText());
+    }
+
+    @Test void automaticSnapshotRoundsSubmillisecondObservationToStrictMillisecondUpperBound() throws Exception {
+        var config = fixtureConfig(directory, Map.of());
+        ObjectNode snapshot = (ObjectNode) Json.MAPPER.readTree(Files.readAllBytes(config.tasksFile()));
+        snapshot.put("observed_at", "2026-10-15T06:00:00.000500Z");
+        ObjectNode atBoundary = ((ObjectNode) snapshot.path("tasks").get(1)).deepCopy().put("failed_at", "2026-10-15T06:00:00.000500Z");
+        snapshot.putArray("tasks").add(atBoundary);
+        Files.writeString(config.tasksFile(), snapshot.toString());
+        var service = start(config, new FileLogSource(config.logsFile()));
+
+        var report = completed(service, service.submitAutomatic());
+
+        assertEquals("2026-10-15T06:00:00.001Z", report.path("request").path("selection").path("to").asText());
+        assertEquals(1, report.path("selected_count").asInt());
+    }
+
+    @Test void automaticEnablesConfiguredNarrativeWithoutChangingRuleResultsOrArchiving() throws Exception {
+        var config = fixtureConfig(directory, Map.of());
+        AtomicInteger modelCalls = new AtomicInteger();
+        var generator = new LogNarrativeGenerator((messages, tools) -> {
+            modelCalls.incrementAndGet();
+            return new LlmClient.Reply(Json.MAPPER.createObjectNode().put("role", "assistant").put("content",
+                    "{\"summary\":\"人工测试摘要\",\"findings\":[],\"recommendations\":[],\"limitations\":[]}"), "stop");
+        }, "synthetic-model", "https://example.invalid/v1");
+        var service = start(config, new FileLogSource(config.logsFile()), TaskSource.file(config), generator);
+        var automatic = completed(service, service.submitAutomatic());
+        ObjectNode manualRequest = automatic.path("request").deepCopy();
+        manualRequest.put("narrative", "none");
+        var manual = completed(service, service.submit(manualRequest));
+
+        assertEquals("llm", automatic.path("request").path("narrative").asText());
+        assertEquals("AVAILABLE", automatic.path("narrative_status").asText());
+        assertEquals(1, modelCalls.get());
+        assertEquals("NOT_REQUESTED", automatic.path("archive_status").asText());
+        assertTrue(automatic.path("archive_parts").isEmpty());
+        for (String field : List.of("tasks", "evidence", "clusters", "engineer_view", "selected_count", "retrieved_event_count"))
+            assertEquals(manual.path(field), automatic.path(field), field);
+        assertSpoolEmpty(config);
+    }
+
+    @Test void automaticConfiguredNarrativeSkipsModelWhenNoEvidenceExists() throws Exception {
+        var config = fixtureConfig(directory, Map.of());
+        AtomicInteger calls = new AtomicInteger();
+        var generator = new LogNarrativeGenerator((messages, tools) -> { calls.incrementAndGet(); throw new IOException("must-not-run"); },
+                "synthetic-model", "https://example.invalid/v1");
+        var service = start(config, (query, maxEvents, maxBytes, deadline) -> new FetchResult(List.of(), true, List.of(), 0),
+                TaskSource.file(config), generator);
+
+        var report = completed(service, service.submitAutomatic());
+
+        assertEquals("llm", report.path("request").path("narrative").asText());
+        assertEquals("SKIPPED_NO_EVIDENCE", report.path("narrative_status").asText());
+        assertEquals(0, calls.get());
+        assertEquals(6, report.path("engineer_view").path("summary").path("pending_task_count").asInt());
+    }
+
+    @Test void automaticSnapshotReadsAreBoundedAndMalformedTimesNeverLeakInput() throws Exception {
+        var config = fixtureConfig(directory, Map.of());
+        var service = start(config, new FileLogSource(config.logsFile()));
+        for (String body : List.of("{\"private\":\"synthetic-private-secret\",", "{}", "{\"observed_at\":23}",
+                "{\"observed_at\":\"synthetic-private-secret\"}", "{\"observed_at\":\"-1000000000-01-01T00:00:00Z\"}",
+                "{\"observed_at\":\"2026-10-15T06:00:00Z\"} {}", " ".repeat((8 << 20) + 1))) {
+            Files.writeString(config.tasksFile(), body);
+            var failure = assertThrows(TaskSnapshot.Unprocessable.class, service::submitAutomatic);
+            assertFalse(failure.getMessage().contains("synthetic-private-secret"));
+        }
+        try (var files = Files.list(config.dataDir().resolve("reports"))) { assertEquals(0, files.count()); }
+    }
+
+    @Test void automaticRetainsSourceFactsAndCollectsPastTaskSelectionUpperBound() throws Exception {
+        var config = fixtureConfig(directory, Map.of());
+        var created = Instant.parse("2026-10-15T05:59:50Z");
+        var updated = Instant.parse("2026-10-15T06:10:00Z");
+        var facts = new LogModels.SchedulerFacts("source-record", "external_video", "FAILED", created, updated);
+        var selected = new LogModels.Task("task-source", "task-source", "failed", List.of(), "", "", null, "source-version",
+                LogModels.AssociationScope.TASK_ONLY, facts);
+        AtomicReference<LogModels.LogQuery> actual = new AtomicReference<>();
+        var service = start(config, (query, maxEvents, maxBytes, deadline) -> {
+            actual.set(query);
+            if (!query.from().isAfter(updated) && query.to().isAfter(updated))
+                return new FetchResult(List.of(new LogEvent(updated, "{\"task_id\":\"task-source\",\"event\":\"execution_error\",\"exception_message\":\"HTTP 404\"}",
+                        Map.of("namespace", "prod"), "synthetic-event")), true, List.of(), 80);
+            return new FetchResult(List.of(), true, List.of(), 0);
+        }, request -> new TaskSnapshot.Selection(List.of(selected), updated.plusSeconds(1).toString(), List.of()), null);
+        var request = fixtureRequest().put("log_window", "automatic");
+        var report = completed(service, service.submit(request));
+        var result = report.path("tasks").get(0);
+        assertTrue(actual.get().to().isAfter(Instant.parse(request.path("selection").path("to").asText())));
+        assertEquals("COLLECTED", result.path("collection_status").asText());
+        assertEquals("TASK_ONLY", result.path("association_scope").asText());
+        assertEquals("INCOMPLETE", result.path("signature").asText());
+        assertEquals(TaskSnapshot.schedulerFactsJson(facts), result.path("scheduler_facts"));
+        assertEquals("AUTOMATIC_TASK_LIFECYCLE", result.path("log_lookup").path("strategy").asText());
+        assertEquals("MATCHED", result.path("log_lookup").path("status").asText());
+        assertEquals(1, result.path("log_lookup").path("windows").get(0).path("returned_count").asInt());
+        JsonNode saved = Json.MAPPER.readTree(Files.readAllBytes(config.dataDir().resolve("reports").resolve(report.path("batch_id").asText() + ".json")));
+        assertEquals(TaskSnapshot.schedulerFactsJson(facts), saved.path("_selected_tasks").get(0).path("scheduler_facts"));
+        assertNull(selected.finalAttempt()); assertNull(selected.failedAt());
+    }
+
+    @Test void failedLookupRecordsAttemptedWindowWithoutInventingZeroReturnedRows() throws Exception {
+        var config = fixtureConfig(directory, Map.of());
+        var selected = new LogModels.Task("task-source", "task-source", "failed", List.of(), "", "", null, "source-version", LogModels.AssociationScope.TASK_ONLY);
+        var service = start(config, (query, maxEvents, maxBytes, deadline) -> { throw new IOException("synthetic-query-failure"); },
+                request -> new TaskSnapshot.Selection(List.of(selected), Instant.now().toString(), List.of()), null);
+        var report = completed(service, service.submit(fixtureRequest()));
+        var lookup = report.path("tasks").get(0).path("log_lookup");
+        assertEquals("QUERY_FAILED", lookup.path("status").asText());
+        assertEquals(1, lookup.path("query_count").asInt());
+        assertTrue(lookup.path("windows").get(0).path("returned_count").isNull());
+        assertFalse(lookup.path("windows").get(0).path("complete").asBoolean());
+    }
+
     @Test void incompleteSourceForOneTaskDoesNotInvalidateOtherTaskSignature() throws Exception {
         var config = fixtureConfig(directory, Map.of());
         var file = new FileLogSource(config.logsFile());
@@ -85,6 +262,9 @@ class LogInvestigationServiceTest {
         assertEquals("PARTIAL", report.path("state").asText());
         assertEquals("INCOMPLETE", task(report, "task-A").path("signature").asText());
         assertEquals("CUDA_OOM", task(report, "task-B").path("signature").asText());
+        assertEquals("INCOMPLETE", task(report, "task-A").path("collection_status").asText());
+        assertTrue(task(report, "task-A").path("collection_limitations").toString().contains("SYNTHETIC_PARTIAL_A"));
+        assertEquals("COLLECTED", task(report, "task-B").path("collection_status").asText());
         assertFalse(task(report, "task-B").path("quality_flags").toString().contains("INCOMPLETE_INPUT"));
         assertEquals(2, clusterTotal(report));
     }
@@ -111,6 +291,7 @@ class LogInvestigationServiceTest {
 
         assertEquals(2, report.path("observed_error_event_count").asInt());
         assertEquals(2, report.path("evidence").size());
+        assertEquals(3, task(report, "at").path("collection_event_count").asInt());
         assertTrue(report.path("evidence").toString().contains("/synthetic/at/worker.py"));
         assertTrue(report.path("quality_flags").toString().contains("DUPLICATE_AMBIGUITY"));
     }
@@ -133,6 +314,118 @@ class LogInvestigationServiceTest {
         assertTrue(report.path("bytes_accounting_incomplete").asBoolean());
         assertTrue(report.path("collection_stopped").asBoolean());
         assertTrue(report.path("limitations").toString().contains("SOURCE_UNAVAILABLE_FOR_REMAINDER"));
+    }
+
+    @Test void grafanaUnauthorizedMarksFirstTaskFailedAndLaterTasksSkippedWithoutInventingLogs() throws Exception {
+        var config = fixtureConfig(directory, Map.of());
+        AtomicInteger requests = new AtomicInteger();
+        HttpServer grafana = HttpServer.create(new java.net.InetSocketAddress("127.0.0.1", 0), 0);
+        grafana.createContext("/api/ds/query", exchange -> {
+            requests.incrementAndGet();
+            exchange.getRequestBody().readAllBytes();
+            exchange.sendResponseHeaders(401, -1); exchange.close();
+        });
+        grafana.start();
+        try {
+            URI origin = URI.create("http://127.0.0.1:" + grafana.getAddress().getPort());
+            var source = new GrafanaVictoriaLogsSource(origin, "", "synthetic-datasource", 100, Duration.ofSeconds(2));
+            var service = start(config, source);
+
+            var report = completed(service, service.submit(explicit("none", "task-B", "task-C", "task-E", "task-F")));
+
+            assertEquals(1, requests.get());
+            assertEquals("PARTIAL", report.path("state").asText());
+            assertEquals(0, report.path("retrieved_event_count").asInt());
+            assertEquals(0, report.path("response_bytes").asLong());
+            JsonNode failed = task(report, "task-B");
+            assertEquals("FAILED", failed.path("collection_status").asText());
+            assertTrue(failed.path("collection_limitations").toString().contains("GRAFANA_HTTP_401"));
+            for (String id : List.of("task-C", "task-E", "task-F")) {
+                JsonNode skipped = task(report, id);
+                assertEquals("SKIPPED", skipped.path("collection_status").asText());
+                assertTrue(skipped.path("collection_limitations").toString().contains("SOURCE_UNAVAILABLE_FOR_REMAINDER"));
+                assertEquals(0, skipped.path("log_lookup").path("query_count").asInt());
+                assertTrue(skipped.path("log_lookup").path("windows").isEmpty());
+                assertFalse(skipped.path("log_lookup").path("searched_all_pods").asBoolean());
+            }
+            for (JsonNode result : report.path("tasks")) {
+                assertEquals(0, result.path("collection_event_count").asInt());
+                assertEquals("INCOMPLETE", result.path("signature").asText());
+                assertTrue(result.path("evidence_ids").isEmpty());
+            }
+        } finally { grafana.stop(0); }
+    }
+
+    @Test void successfulEmptyCollectionIsNoMatchesRatherThanCollectionFailure() throws Exception {
+        var config = fixtureConfig(directory, Map.of());
+        var service = start(config, (query, maxEvents, maxBytes, deadline) -> new FetchResult(List.of(), true, List.of(), 37));
+
+        var report = completed(service, service.submit(explicit("none", "task-B")));
+
+        JsonNode task = task(report, "task-B");
+        assertEquals("NO_MATCHES", task.path("collection_status").asText());
+        assertEquals(0, task.path("collection_event_count").asInt());
+        assertTrue(task.path("collection_limitations").isEmpty());
+        assertFalse(report.path("collection_incomplete").asBoolean());
+        assertFalse(report.path("attribution_incomplete").asBoolean());
+        assertEquals("COMPLETED", report.path("state").asText());
+        assertEquals("UNKNOWN", task.path("signature").asText());
+    }
+
+    @Test void successfullyCollectedButUnparseableEvidenceKeepsAttributionIncomplete() throws Exception {
+        var config = fixtureConfig(directory, Map.of());
+        LogEvent invalid = new LogEvent(Instant.parse("2026-10-15T05:23:40Z"), "payload: {'task_id':}",
+                Map.of("namespace", "prod", "task_id", "task-B"), "synthetic-invalid-payload");
+        var service = start(config, (query, maxEvents, maxBytes, deadline) -> new FetchResult(List.of(invalid), true, List.of(), 100));
+
+        var report = completed(service, service.submit(explicit("none", "task-B")));
+
+        JsonNode task = task(report, "task-B");
+        assertEquals("COLLECTED", task.path("collection_status").asText());
+        assertEquals(1, task.path("collection_event_count").asInt());
+        assertTrue(task.path("quality_flags").toString().contains("PARSE_ERROR"));
+        assertFalse(report.path("collection_incomplete").asBoolean());
+        assertTrue(report.path("attribution_incomplete").asBoolean());
+        assertEquals("INCOMPLETE", task.path("signature").asText());
+        assertEquals("PARTIAL", report.path("state").asText());
+    }
+
+    @Test void exhaustedCollectionBudgetIsIncompleteRatherThanSuccessfulNoMatches() throws Exception {
+        var config = fixtureConfig(directory, Map.of("HOLMES_LOG_MAX_EVENTS", "1"));
+        AtomicInteger calls = new AtomicInteger();
+        LogEvent event = new LogEvent(Instant.parse("2026-10-15T05:23:40Z"), "CUDA out of memory",
+                Map.of("namespace", "prod", "task_id", "task-B", "level", "ERROR"), "synthetic-event");
+        var service = start(config, (query, maxEvents, maxBytes, deadline) -> {
+            calls.incrementAndGet(); return new FetchResult(List.of(event), true, List.of(), 100);
+        });
+
+        var report = completed(service, service.submit(explicit("none", "task-B", "task-C")));
+
+        assertEquals(1, calls.get());
+        assertEquals("COLLECTED", task(report, "task-B").path("collection_status").asText());
+        JsonNode second = task(report, "task-C");
+        assertEquals("INCOMPLETE", second.path("collection_status").asText());
+        assertEquals(0, second.path("collection_event_count").asInt());
+        assertTrue(second.path("collection_limitations").toString().contains("COLLECTION_BUDGET_EXHAUSTED"));
+        assertTrue(report.path("collection_incomplete").asBoolean());
+        assertEquals("PARTIAL", report.path("state").asText());
+    }
+
+    @Test void stoppedBeforeAnalysisMarksUnprocessedTasksAsSkipped() throws Exception {
+        var config = fixtureConfig(directory, Map.of());
+        var service = start(config, (query, maxEvents, maxBytes, deadline) -> {
+            throw new IllegalStateException("synthetic-internal-failure");
+        });
+
+        var report = completed(service, service.submit(explicit("none", "task-B", "task-C")));
+
+        assertEquals("FAILED", report.path("state").asText());
+        for (JsonNode result : report.path("tasks")) {
+            assertEquals("NOT_PROCESSED", result.path("analysis_status").asText());
+            assertEquals("SKIPPED", result.path("collection_status").asText());
+            assertEquals(0, result.path("collection_event_count").asInt());
+            assertTrue(result.path("collection_limitations").toString().contains("STOPPED_BEFORE_TASK_ANALYSIS"));
+        }
     }
 
     @Test void requiredArchiveHasTaskScopedUniquePartsAndNoneMakesNoUpload() throws Exception {
@@ -200,6 +493,11 @@ class LogInvestigationServiceTest {
         String id = accepted.path("batch_id").asText();
         assertEquals(1, original.get(id).path("processed_count").asInt());
         original.close();
+        // 模拟升级前已完成的任务：恢复不能从批次总量猜出它的采集状态或事件数。
+        Path checkpointFile = config.dataDir().resolve("reports").resolve(id + ".json");
+        ObjectNode checkpoint = (ObjectNode) Json.MAPPER.readTree(Files.readAllBytes(checkpointFile));
+        ((ObjectNode) checkpoint.path("tasks").get(0)).remove(List.of("collection_status", "collection_event_count", "collection_limitations"));
+        Files.writeString(checkpointFile, checkpoint.toString());
         ObjectNode snapshot = (ObjectNode) Json.MAPPER.readTree(Files.readAllBytes(config.tasksFile()));
         snapshot.putArray("tasks");
         Files.writeString(config.tasksFile(), snapshot.toString());
@@ -216,6 +514,9 @@ class LogInvestigationServiceTest {
         assertEquals(6, new HashSet<>(taskIds(report)).size());
         assertEquals(6, clusterTotal(report));
         assertEquals(0, recollectedF.get());
+        assertFalse(task(report, "task-F").has("collection_status"));
+        assertFalse(task(report, "task-F").has("collection_event_count"));
+        assertFalse(task(report, "task-F").has("collection_limitations"));
     }
 
     @Test void storageFailureReturnsBoundedTerminalInsteadOfLeavingAwaitRunning() throws Exception {
@@ -257,8 +558,11 @@ class LogInvestigationServiceTest {
     }
 
     private LogInvestigationService start(LogConfig config, LogSource source) throws IOException {
+        return start(config, source, TaskSource.file(config), null);
+    }
+    private LogInvestigationService start(LogConfig config, LogSource source, TaskSource tasks, LogNarrativeGenerator generator) throws IOException {
         var service = new LogInvestigationService(config, source, new FluxDropArchiveSink(config.fluxDropUrl(), "", config.dataDir().resolve("spool"),
-                config.spoolBytes(), config.chunkBytes(), config.requestTimeout()));
+                config.spoolBytes(), config.chunkBytes(), config.requestTimeout()), tasks, generator);
         services.add(service); return service;
     }
     private void startFluxDrop(CountDownLatch received, CountDownLatch release) throws IOException {

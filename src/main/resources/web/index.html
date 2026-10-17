@@ -12,13 +12,17 @@
 <body>
   <header class="navbar navbar-expand navbar-dark py-0 brand-bar">
     <div class="container-fluid shell-width px-3 px-md-4 h-100 gap-3 gap-md-4">
-      <a class="navbar-brand m-0 fs-5 fw-semibold d-flex align-items-center" href="/" aria-label="Holmes home" data-i18n-aria="home"><span class="brand-mark border border-2 border-white rounded d-inline-flex justify-content-center align-items-center lh-1 me-2 fs-6" aria-hidden="true">H</span>Holmes</a>
+      <a class="navbar-brand m-0 fs-5 fw-semibold d-flex align-items-center" href="/" aria-label="Holmes home" data-i18n-aria="home"><span class="brand-mark d-inline-flex justify-content-center align-items-center lh-1 me-2 fs-6" aria-hidden="true">H</span>Holmes</a>
       <nav id="navigation" class="navbar-nav flex-row gap-3 me-auto h-100" aria-label="Main navigation" data-i18n-aria="mainNavigation" hidden>
         <button class="nav-link active border-0 bg-transparent px-0" type="button" data-view="logs" aria-current="page" data-i18n="logAnalysis">Log analysis</button>
         <button class="nav-link border-0 bg-transparent px-0" type="button" data-view="ask" data-i18n="generalAsk">Ask Holmes</button>
       </nav>
       <div class="d-flex align-items-center gap-3 ms-auto">
-        <select id="language" class="form-select form-select-sm w-auto" aria-label="Language" data-i18n-aria="language"><option value="en">English</option><option value="zh">中文</option></select>
+        <div class="language-switch" role="group" aria-label="Language" data-i18n-aria="language">
+          <button id="language-zh" class="language-option" type="button" data-language="zh" lang="zh" aria-pressed="false">中文</button>
+          <button id="language-en" class="language-option" type="button" data-language="en" lang="en" aria-pressed="true">EN</button>
+        </div>
+        <select id="language" hidden aria-hidden="true" tabindex="-1"><option value="en">English</option><option value="zh">中文</option></select>
         <button id="logout" class="btn btn-link btn-sm text-white text-decoration-none p-0" type="button" data-i18n="logout" hidden>Sign out</button>
       </div>
     </div>
@@ -39,46 +43,80 @@
     <div id="app-view" hidden>
       <div id="global-notice" class="alert alert-danger py-2 small" role="alert" hidden></div>
       <section id="logs-view" aria-labelledby="logs-heading">
-        <div class="d-flex flex-wrap justify-content-between align-items-start gap-3 mb-4">
+        <div class="page-heading d-flex flex-wrap justify-content-between align-items-start gap-3 mb-4">
           <div><h1 id="logs-heading" class="h3 mb-2" data-i18n="logAnalysis">Log analysis</h1><p class="text-secondary mb-0" data-i18n="logIntro">Connect task logs across Pods and review shared failure patterns.</p></div>
           <span id="data-badge" class="badge text-bg-light border text-secondary fw-normal" data-i18n="loadingConfig">Loading configuration</span>
         </div>
         <div id="snapshot-notice" class="alert alert-light border py-2 small" role="status"></div>
-        <section class="card mb-4" aria-labelledby="new-heading"><div class="card-body p-3 p-md-4">
-          <h2 id="new-heading" class="h5 mb-4" data-i18n="newAnalysis">New analysis</h2>
-          <form id="analysis-form">
+        <section class="card discovery-card mb-4" aria-labelledby="new-heading"><div class="card-body p-3 p-md-4">
+          <h2 id="new-heading" class="visually-hidden" data-i18n="newAnalysis">Discover frequent errors</h2>
+          <form id="analysis-form" novalidate>
+            <p class="small mb-2" data-i18n="automaticPolicy">Automatically check the last 24 hours, up to 50 failed tasks; sort by affected task count.</p>
+            <details class="automatic-analysis-details small text-secondary"><summary id="automatic-model-summary"></summary><p id="automatic-model-hint" class="technical-wrap mt-2 mb-0"></p></details>
+            <div id="legacy-request-inputs" hidden aria-hidden="true">
             <div class="row g-3 mb-3">
-              <div class="col-md-6"><label class="form-label small" for="source" data-i18n="logSource">Log source</label><input id="source" class="form-control bg-light" type="text" readonly></div>
-              <div class="col-md-6"><label class="form-label small" for="namespace">Namespace</label><select id="namespace" class="form-select" required></select></div>
+              <div class="col-md-6 d-flex align-items-end"><input id="source" type="hidden"><p class="small text-secondary mb-2"><span data-i18n="logSource">Log source</span>: <span id="source-current" class="technical-wrap"></span></p></div>
+              <div class="col-md-6"><label class="form-label small" for="namespace">Namespace</label><select id="namespace" class="form-select" disabled></select></div>
             </div>
             <fieldset class="mb-3"><legend class="form-label small mb-2" data-i18n="selectTasks">Select tasks</legend><div class="d-flex flex-wrap gap-4">
-              <div class="form-check"><input id="mode-latest" class="form-check-input" type="radio" name="selection-mode" value="latest_failed" checked><label id="latest-mode-label" class="form-check-label small" for="mode-latest" data-i18n="latestFailed">Latest failed tasks</label></div>
-              <div class="form-check"><input id="mode-explicit" class="form-check-input" type="radio" name="selection-mode" value="explicit_task_ids"><label class="form-check-label small" for="mode-explicit" data-i18n="explicitTasks">Specific task IDs</label></div>
+              <div class="form-check"><input id="mode-latest" class="form-check-input" type="radio" disabled name="selection-mode" value="latest_failed" checked><label id="latest-mode-label" class="form-check-label small" for="mode-latest" data-i18n="latestFailed">Latest failed tasks</label></div>
+              <div class="form-check"><input id="mode-explicit" class="form-check-input" type="radio" disabled name="selection-mode" value="explicit_task_ids"><label class="form-check-label small" for="mode-explicit" data-i18n="explicitTasks">Specific task IDs</label></div>
             </div></fieldset>
-            <div id="count-field" class="mb-3"><label class="form-label small" for="requested-count" data-i18n="taskCount">Task count</label><input id="requested-count" class="form-control count-input" type="number" min="1" max="50" step="1" value="20" required><div class="form-text" data-i18n="taskCountHint">Up to 50. If fewer failed tasks are available, the actual count is used.</div></div>
-            <div id="ids-field" class="mb-3" hidden><label class="form-label small" for="task-ids">Task IDs</label><textarea id="task-ids" class="form-control" rows="3" placeholder="One per line, or separated by commas" data-i18n-placeholder="taskIdsPlaceholder" spellcheck="false"></textarea><div class="form-text" data-i18n="taskIdsHint">Up to 50 unique tasks. Duplicate IDs count once.</div></div>
-            <div class="row g-3"><div class="col-md-6"><label class="form-label small" for="from" data-i18n="from">Start time</label><input id="from" class="form-control" type="datetime-local" step="0.001" required></div><div class="col-md-6"><label class="form-label small" for="to" data-i18n="to">End time</label><input id="to" class="form-control" type="datetime-local" step="0.001" required></div></div>
+            <div id="count-field" class="mb-3"><label class="form-label small" for="requested-count" data-i18n="taskCount">Task count</label><input id="requested-count" class="form-control count-input" type="number" min="1" max="50" step="1" value="20" disabled><div class="form-text" data-i18n="taskCountHint">Up to 50. If fewer failed tasks are available, the actual count is used.</div></div>
+            <div id="ids-field" class="mb-3" hidden><label class="form-label small" for="task-ids">Task IDs</label><textarea id="task-ids" class="form-control" disabled rows="3" placeholder="One per line, or separated by commas" data-i18n-placeholder="taskIdsPlaceholder" spellcheck="false"></textarea><div class="form-text" data-i18n="taskIdsHint">Up to 50 unique tasks. Duplicate IDs count once.</div></div>
+            <div class="row g-3"><div class="col-md-6"><label class="form-label small" for="from" data-i18n="from">Start time</label><input id="from" class="form-control" type="datetime-local" step="0.001" disabled></div><div class="col-md-6"><label class="form-label small" for="to" data-i18n="to">End time</label><input id="to" class="form-control" type="datetime-local" step="0.001" disabled></div></div>
             <div id="timezone-hint" class="form-text"></div>
             <div id="source-time-hint" class="form-text mt-2" hidden></div>
-            <div class="form-check mt-4"><input id="raw-archive" class="form-check-input" type="checkbox"><label class="form-check-label small" for="raw-archive" data-i18n="archiveChoice">Save this collection to FluxDrop</label></div>
+            <details id="form-advanced" class="small mt-4"><summary class="text-secondary" data-i18n="formAdvanced">Advanced: archive and optional AI</summary><div class="pt-2">
+            <div class="form-check mt-3"><input id="raw-archive" class="form-check-input" type="checkbox" disabled><label class="form-check-label small" for="raw-archive" data-i18n="archiveChoice">Save this collection to FluxDrop</label></div>
             <div class="form-text" data-i18n="archiveHint">Otherwise, only the report and key excerpts are kept. Archive failures are reported explicitly.</div>
+            <div class="form-check mt-3"><input id="log-narrative" class="form-check-input" type="checkbox" aria-describedby="log-narrative-hint" disabled><label class="form-check-label small" for="log-narrative" data-i18n="narrativeChoice">Generate an LLM explanation from representative evidence</label></div>
+            <p id="log-narrative-hint" class="form-text technical-wrap mb-0"></p>
+            </div></details>
+            </div>
             <p id="analysis-error" class="text-danger small mt-3" role="alert" hidden></p>
-            <div class="d-flex flex-wrap align-items-center gap-3 mt-4"><button id="analysis-submit" class="btn btn-primary" type="submit" disabled data-i18n="startAnalysis">Start analysis</button><span id="submit-hint" class="text-secondary small"></span></div>
+            <div class="d-flex flex-wrap align-items-center gap-3"><button id="analysis-submit" class="btn btn-primary" type="submit" disabled data-i18n="startAnalysis">Discover frequent errors</button><span id="submit-hint" class="text-secondary small"></span></div>
           </form>
         </div></section>
-        <details class="mb-4 small"><summary class="text-secondary" data-i18n="restoreBatch">Open an existing batch</summary><form id="restore-form" class="row g-2 align-items-end mt-2"><div class="col-sm"><label class="form-label small" for="restore-id" data-i18n="batchId">Batch ID</label><input id="restore-id" class="form-control" type="text" spellcheck="false" autocomplete="off" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" required></div><div class="col-sm-auto"><button id="restore-submit" class="btn btn-outline-secondary" type="submit" data-i18n="openBatch">Open batch</button></div></form><p id="restore-error" class="text-danger small mt-2" role="alert" hidden></p></details>
+        <details class="restore-batch mb-4 small"><summary class="text-secondary" data-i18n="restoreBatch">Open an existing batch</summary><form id="restore-form" class="row g-2 align-items-end mt-2"><div class="col-sm"><label class="form-label small" for="restore-id" data-i18n="batchId">Batch ID</label><input id="restore-id" class="form-control" type="text" spellcheck="false" autocomplete="off" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" required></div><div class="col-sm-auto"><button id="restore-submit" class="btn btn-outline-secondary" type="submit" data-i18n="openBatch">Open batch</button></div></form><p id="restore-error" class="text-danger small mt-2" role="alert" hidden></p></details>
         <section id="report-section" aria-labelledby="report-heading" hidden>
           <div class="d-flex justify-content-between align-items-center gap-3 mb-2"><h2 id="report-heading" class="h5 mb-0" data-i18n="results">Analysis results</h2><span id="batch-state" class="badge text-bg-light border fw-normal"></span></div>
           <div class="d-flex flex-wrap justify-content-between gap-2 mb-3 small"><span id="batch-id" class="font-monospace text-secondary"></span><button id="download-report" class="btn btn-link btn-sm p-0 text-decoration-none" type="button" data-i18n="downloadReport">Download JSON report</button></div>
-          <div class="d-flex align-items-center gap-3 mb-3"><div class="progress flex-grow-1" role="progressbar" aria-label="Task progress" data-i18n-aria="taskProgress" aria-valuemin="0" aria-valuemax="1" aria-valuenow="0"><div id="batch-progress" class="progress-bar"></div></div><span id="batch-progress-text" class="small text-secondary text-nowrap" aria-live="polite"></span></div>
-          <p id="report-summary" class="mb-2"></p><p id="report-counts" class="text-secondary small mb-4"></p>
+          <section id="investigation-progress" class="investigation-progress mb-4" aria-labelledby="progress-stage" data-tone="active">
+            <div class="progress-heading"><h3 id="progress-stage" class="h6 mb-0" aria-live="polite"></h3><span id="progress-status" class="progress-status"></span></div>
+            <p id="progress-caption" class="visually-hidden"></p>
+            <div class="progress investigation-track" role="progressbar" aria-label="Task progress" data-i18n-aria="taskProgress" aria-valuemin="0" aria-valuemax="1"><div id="batch-progress" class="progress-bar"></div></div>
+            <p id="batch-progress-text" class="progress-detail" aria-live="polite"></p>
+            <ol id="progress-steps" class="visually-hidden" aria-label="Investigation stages" data-i18n-aria="pipelineStages"></ol>
+          </section>
+          <p id="engineer-summary" class="engineer-summary mb-4" aria-live="polite"></p>
           <div id="poll-error" class="alert alert-danger small" role="alert" hidden><p id="poll-error-text"></p><button id="retry-poll" class="btn btn-outline-secondary btn-sm" type="button" data-i18n="retry">Retry</button></div>
+          <div id="engineer-alert" class="alert alert-warning small" role="alert" hidden></div>
+          <section id="error-samples-section" class="mb-4" aria-labelledby="error-samples-heading"><h3 id="error-samples-heading" class="h5 mb-2" data-i18n="typicalErrors">Frequent errors</h3><p class="text-secondary small mb-3" data-i18n="typicalErrorsHint">Grouped by observed error; a shared root cause has not been confirmed.</p><div id="error-samples"></div><p id="error-samples-limit" class="small text-secondary mt-2" hidden></p></section>
+          <section id="pending-section" class="card mb-4" aria-labelledby="pending-heading" hidden><div class="card-body p-3 p-md-4"><h3 id="pending-heading" class="h6 mb-3" data-i18n="pendingEvidence">Tasks needing more evidence</h3><div id="pending-tasks"></div></div></section>
+          <details id="narrative-section" class="card mb-4" aria-labelledby="narrative-heading"><summary class="card-body py-3 px-3 px-md-4 d-flex flex-wrap align-items-center justify-content-between gap-2"><span id="narrative-heading" class="fw-semibold flex-grow-1" data-i18n="optionalNarrative">Optional AI explanation</span><span id="narrative-status" class="step-status m-0" role="status" aria-live="polite"></span></summary><div class="card-body pt-0 p-3 p-md-4">
+            <p class="form-text mb-2" data-i18n="narrativeScope">The model can inspect this batch's representative evidence with read-only tools. Its analysis does not replace rule-based counts or verify final-attempt ownership.</p>
+            <p id="narrative-status-detail" class="small text-secondary mb-2"></p>
+            <p id="narrative-destination" class="small text-secondary technical-wrap mb-3"></p>
+            <button id="narrative-submit" class="btn btn-outline-primary btn-sm" type="button" disabled data-i18n="generateNarrative">Generate LLM explanation</button>
+            <p id="narrative-error" class="text-danger small mt-3 mb-0" role="alert" hidden></p>
+            <p id="narrative-safe-error" class="text-danger small mt-3 mb-0" role="alert" hidden></p>
+            <div id="narrative-content" class="narrative-content mt-3" hidden></div>
+          </div></details>
+          <details id="report-advanced" class="mb-4"><summary class="text-secondary small mb-3" data-i18n="reportAdvanced">All tasks and investigation details</summary>
+          <p id="report-sampling-window" class="small text-secondary technical-wrap mb-2"></p>
+          <p id="report-summary" class="mb-2"></p><p id="report-counts" class="text-secondary small mb-4"></p>
+          <section id="batch-diagnostic" class="batch-diagnostic mb-4" aria-labelledby="diagnostic-heading" aria-live="polite">
+            <h3 id="diagnostic-heading" class="h6 mb-2"></h3><ul id="diagnostic-reasons" class="small mb-2"></ul><p id="diagnostic-next" class="small mb-3"></p>
+            <ol id="pipeline-steps" class="pipeline-steps list-unstyled mb-0" aria-label="Investigation stages" data-i18n-aria="pipelineStages"></ol>
+          </section>
           <div id="quality-section" class="alert alert-light border small" hidden><h3 class="h6" data-i18n="evidenceQuality">Evidence scope and gaps</h3><ul id="quality-list" class="mb-0"></ul><details id="quality-technical" class="mt-2" hidden><summary data-i18n="technicalDetails">Technical details</summary><ul id="quality-technical-list" class="mt-2 mb-0"></ul></details></div>
           <section class="card mb-4" aria-labelledby="clusters-heading"><div class="card-body p-3 p-md-4"><h3 id="clusters-heading" class="h6" data-i18n="failureClusters">Failure patterns</h3><p class="form-text mb-2" data-i18n="clusterHint">Percentages use all selected failed tasks. A failure signature describes an observation, not a proven shared root cause.</p><div id="clusters"></div></div></section>
           <section id="observed-section" class="card mb-4" aria-labelledby="observed-heading" hidden><div class="card-body p-3 p-md-4"><h3 id="observed-heading" class="h6" data-i18n="observedPatterns">Observed error patterns</h3><p class="form-text mb-2" data-i18n="observedClustersHint">These are task-level observations; final attempts and retries are not verified. One task may appear in several groups, so counts and percentages can overlap.</p><div id="observed-clusters"></div></div></section>
-          <section class="card mb-4" aria-labelledby="tasks-heading"><div class="card-body p-3 p-md-4"><h3 id="tasks-heading" class="h6" data-i18n="failedTasks">Failed tasks</h3><div class="table-responsive"><table class="table table-sm align-middle small mb-0"><thead><tr><th scope="col">Task ID</th><th scope="col" data-i18n="failureSignature">Failure signature</th><th scope="col" data-i18n="finalAttempt">Final attempt</th><th scope="col" data-i18n="evidenceStatus">Evidence status</th><th scope="col" data-i18n="details">Details</th></tr></thead><tbody id="tasks-body"></tbody></table></div><p id="tasks-empty" class="text-secondary small my-3" data-i18n="waitingTasks">Waiting for task results.</p></div></section>
+          <section class="card mb-4" aria-labelledby="tasks-heading"><div class="card-body p-3 p-md-4"><h3 id="tasks-heading" class="h6" data-i18n="failedTasks">Failed tasks</h3><div class="table-responsive"><table class="table table-sm align-middle small mb-0"><thead><tr><th scope="col">Task ID</th><th scope="col" data-i18n="collectionStatus">Log collection</th><th scope="col" data-i18n="failureSignature">Failure signature</th><th scope="col" data-i18n="finalAttempt">Final attempt</th><th scope="col" data-i18n="evidenceStatus">Evidence status</th><th scope="col" data-i18n="details">Details</th></tr></thead><tbody id="tasks-body"></tbody></table></div><p id="tasks-empty" class="text-secondary small my-3" data-i18n="waitingTasks">Waiting for task results.</p></div></section>
           <section id="task-detail" class="card mb-4" aria-labelledby="task-heading" hidden><div class="card-body p-3 p-md-4"><div class="d-flex justify-content-between align-items-center gap-3 mb-3"><h3 id="task-heading" class="h6 mb-0" data-i18n="taskDetails">Task details</h3><button id="close-detail" class="btn btn-link btn-sm p-0 text-decoration-none" type="button" data-i18n="close">Close</button></div><div id="task-detail-content"></div><p id="task-detail-error" class="text-danger small mt-3" role="alert" hidden></p></div></section>
           <section class="card mb-4" aria-labelledby="archive-heading"><div class="card-body p-3 p-md-4"><h3 id="archive-heading" class="h6" data-i18n="logArchive">Log archive</h3><p id="archive-summary" class="text-secondary small"></p><div id="archive-parts"></div></div></section>
+          </details>
         </section>
       </section>
       <section id="ask-view" aria-labelledby="ask-heading" hidden>

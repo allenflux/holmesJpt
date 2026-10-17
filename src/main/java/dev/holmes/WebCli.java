@@ -2,6 +2,8 @@ package dev.holmes;
 
 import dev.holmes.logs.LogConfig;
 import dev.holmes.logs.LogInvestigationService;
+import dev.holmes.logs.LogNarrativeGenerator;
+import dev.holmes.logs.LogNarratives;
 import dev.holmes.logs.TaskSource;
 import dev.holmes.tools.ToolRegistry;
 import java.io.IOException;
@@ -55,6 +57,12 @@ public final class WebCli {
         if (demo && (!Files.isRegularFile(logConfig.tasksFile()) || !Files.isRegularFile(logConfig.logsFile()))) {
             throw new IOException("演示文件不可用，请从项目根目录启动 web --demo");
         }
+        LogNarrativeGenerator narrative = null;
+        try { narrative = LogNarratives.from(env, demo); }
+        catch (RuntimeException e) {
+            if (demo) throw new IOException("演示日志解释配置不可用");
+            System.err.println("日志模型解释未启用：请检查服务端 LLM 配置");
+        }
         AgentEngine engine = null;
         if (demo || !env.getOrDefault("LLM_API_KEY", "").isBlank()) {
             try {
@@ -72,9 +80,10 @@ public final class WebCli {
             }
         }
         TaskSource tasks = TaskSource.from(logConfig, env);
-        LogInvestigationService logs = new LogInvestigationService(logConfig, tasks);
+        LogInvestigationService logs = new LogInvestigationService(logConfig, tasks, narrative);
         try {
-            var server = new HttpApi(engine, logs).startWeb(web, new WebStatus(logConfig, engine != null, demo, tasks.asynchronousSelection()));
+            var server = new HttpApi(engine, logs).startWeb(web,
+                    new WebStatus(logConfig, engine != null, demo, tasks.asynchronousSelection(), narrative));
             Runtime.getRuntime().addShutdownHook(new Thread(() -> { server.stop(1); logs.close(); }));
             String host = web.host().contains(":") ? "[" + web.host() + "]" : web.host();
             System.out.println("Holmes 网页已启动：http://" + host + ":" + server.getAddress().getPort());
@@ -91,7 +100,8 @@ public final class WebCli {
                 可选 HOLMES_WEB_PASSWORD（至少 12 个字符）启用密码访问。
                 日志配置沿用 HOLMES_LOG_* / HOLMES_GRAFANA_* / HOLMES_FLUXDROP_*。
                 默认自动读取 HOLMES_SCHEDULER_URL 任务接口；--tasks 文件 可改用任务快照。
-                配置 LLM_API_KEY 后启用通用问答；--demo 使用明确标注的固定合成样本。
+                配置 LLM_API_KEY 后启用通用问答与可选日志解释；日志解释需在页面显式请求。
+                --demo 使用明确标注的固定合成样本和本机解释，不调用外部模型。
                 远端 Docker Compose 与 HTTPS 反向代理步骤见 docs/网页服务与部署.md。
                 """);
     }

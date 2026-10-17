@@ -90,11 +90,11 @@ Java 源码仓库为 [allenflux/holmesJpt](https://github.com/allenflux/holmesJp
 
 ## 独立日志首版
 
-`logs analyze` / `logs serve` 默认通过线上统计 GET API 读取失败任务，关联 Grafana / VictoriaLogs 所有 Pod 的 task_id / prompt_id 日志，并按需将大日志归档到 FluxDrop。无需人工准备任务快照；显式设置 `HOLMES_LOG_TASKS_FILE` 或 `--tasks` 时优先使用文件。此模式无需模型 Key，提供异步批次 API、有界本地检查点和固定离线样本；生产 Grafana 读取权限仍需验证。
+`logs analyze` / `logs serve` 默认通过线上统计 GET API 读取失败任务，关联 Grafana / VictoriaLogs 所有 Pod 的 task_id / prompt_id 日志，并按需将大日志归档到 FluxDrop。无需人工准备任务快照；显式设置 `HOLMES_LOG_TASKS_FILE` 或 `--tasks` 时优先使用文件。此模式无需模型 Key，提供异步批次 API、有界本地检查点和固定离线样本；指定任务的 Grafana 读取权限已验证；最终执行与重试归属仍需补齐。可选模型解释的启动与数据边界见[日志使用指南](docs/日志首版使用指南.md#可选-llm-解释启动请求与结果)。
 
 线上按 `created_at` 筛选请求窗口，`status=-1` 表示读取时失败，`updated_at` 不是失败时间；动态分页与预算截断不保证取全。缺少 prompt、attempt 或重试状态时，报告保留候选证据和 `observed_signatures`，主簇标为 `INCOMPLETE`。`observed_clusters` 是可重叠候选组，不能与主 `clusters` 混作最终失败根因。
 
-运行步骤、样本预期、API、归档和容量边界见 [日志首版使用指南](docs/日志首版使用指南.md)。
+运行步骤、样本预期、API、归档和容量边界见 [日志首版使用指南](docs/日志首版使用指南.md)。 页面现在以“失败任务 → 对应日志 → 典型错误 → 工程师处理卡片”为主线；先看错误样本和待补证据列表，可下载单卡交接，详细规则与质量状态按需展开。见[工程师流程](docs/工程师错误处理流程.md)。
 
 ## 网页本地调试与部署
 
@@ -105,6 +105,6 @@ mvn package
 java -jar target/holmes-java-0.1.0.jar web --demo --port 8080
 ```
 
-浏览器打开 [http://127.0.0.1:8080](http://127.0.0.1:8080) 直接进入页面。`HOLMES_WEB_PASSWORD` 缺失或留空时不启用登录；以后需要时可在已有 `.env` 配置 12–256 个字符的密码，重启后启用。去掉 `--demo` 后默认自动读取线上失败任务，`HOLMES_LOG_TASKS_FILE` 留空即可；日志来自实际 Grafana 数据源。配置 `LLM_API_KEY` 后启用通用问答。Docker Compose、同站 HTTPS 代理及远端配置步骤见 [网页服务与部署](docs/网页服务与部署.md)。
+浏览器打开 [http://127.0.0.1:8080](http://127.0.0.1:8080) 直接进入页面。`HOLMES_WEB_PASSWORD` 缺失或留空时不启用登录；以后需要时可在已有 `.env` 配置 12–256 个字符的密码，重启后启用。去掉 `--demo` 后默认自动读取线上失败任务，`HOLMES_LOG_TASKS_FILE` 留空即可；日志来自实际 Grafana 数据源。配置 `LLM_API_KEY` 后启用通用问答与按需日志解释；首页点击“发现高频错误”即可：服务器自动确定最近24小时、最多50个失败任务，按本批影响任务数排序生成工程师处理卡片；配置模型后自动调用只读证据工具辅助解释，零证据时跳过。Docker Compose、同站 HTTPS 代理及远端配置步骤见 [网页服务与部署](docs/网页服务与部署.md)。
 
 网页名称为 **Holmes**，默认 English，支持切换中文。Bootstrap CSS 与 JavaScript 直接使用官方 `cdn.jsdelivr.net` 的固定 `5.3.8` 版本，并校验 SRI；运行浏览器需要能访问该 CDN。应用自己的 CSS 与 JavaScript 仍由本地服务提供，密钥只在服务端配置。`localStorage` 仅保存语言偏好，`sessionStorage` 仅保存当前批次 ID，不存储密码或 API Key。

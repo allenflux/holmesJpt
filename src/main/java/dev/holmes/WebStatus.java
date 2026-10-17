@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import dev.holmes.logs.LogConfig;
 import dev.holmes.logs.LogRequest;
+import dev.holmes.logs.LogNarrativeGenerator;
 import dev.holmes.logs.TaskSnapshot;
 import java.io.IOException;
 import java.nio.file.Files;
@@ -12,19 +13,25 @@ import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.function.Supplier;
 
-/** 浏览器只接收操作所需的公开配置；凭据、URL 和本机文件路径不进入响应。 */
+/** 浏览器接收操作所需的公开配置与模型发送目的地；凭据、采集源地址和本机路径不进入响应。 */
 public final class WebStatus implements Supplier<JsonNode> {
     private final LogConfig logs;
     private final boolean askEnabled;
     private final boolean demo;
     private final boolean scheduler;
+    private final LogNarrativeGenerator narrative;
 
     public WebStatus(LogConfig logs, boolean askEnabled, boolean demo) {
         this(logs, askEnabled, demo, false);
     }
 
     public WebStatus(LogConfig logs, boolean askEnabled, boolean demo, boolean scheduler) {
+        this(logs, askEnabled, demo, scheduler, null);
+    }
+
+    public WebStatus(LogConfig logs, boolean askEnabled, boolean demo, boolean scheduler, LogNarrativeGenerator narrative) {
         this.logs = logs; this.askEnabled = askEnabled; this.demo = demo; this.scheduler = scheduler;
+        this.narrative = narrative;
     }
 
     @Override public JsonNode get() {
@@ -32,7 +39,10 @@ public final class WebStatus implements Supplier<JsonNode> {
                 .put("app_name", "Holmes").put("version", "0.1.0")
                 .put("demo", demo).put("data_mode", logs.logsFile() == null ? "grafana" : "file")
                 .put("log_source", logs.source()).put("task_source", scheduler ? "scheduler_api" : "snapshot_file");
-        result.putObject("capabilities").put("logs", true).put("ask", askEnabled);
+        result.putObject("capabilities").put("logs", true).put("ask", askEnabled).put("log_narrative", narrative != null);
+        var model = result.putObject("log_narrative").put("enabled", narrative != null).put("demo", demo);
+        if (narrative != null) model.put("model", narrative.model()).put("destination", narrative.destination())
+                .put("mode", narrative.toolDriven() ? "tool_driven" : "summary");
         var namespaces = result.putArray("namespaces");
         logs.namespaces().stream().sorted().forEach(namespaces::add);
         ObjectNode snapshot = result.putObject("snapshot").put("ready", false).put("failed_count", 0);
@@ -76,7 +86,7 @@ public final class WebStatus implements Supplier<JsonNode> {
                 .put("requested_count", demo && snapshot.path("ready").asBoolean()
                         ? Math.max(1, Math.min(20, snapshot.path("failed_count").asInt())) : 20)
                 .put("from", to.minusSeconds(3600).toString()).put("to", to.toString())
-                .put("raw_archive", "none");
+                .put("raw_archive", "none").put("narrative", demo && narrative != null ? "llm" : "none");
         return result;
     }
 }
